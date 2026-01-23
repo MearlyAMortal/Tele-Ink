@@ -120,7 +120,7 @@ static void paintHomeScreen(void) {
     Paint_Clear(WHITE);
     // title
     Paint_DrawString_EN(10, 5, "Tele-Ink", &Font24, WHITE, BLACK);
-    Paint_DrawString_EN(160, 15, "Version 0.1.4", &Font12, WHITE, BLACK);
+    Paint_DrawString_EN(160, 10, "Version 0.1.4", &Font12, WHITE, BLACK);
     //  status
     if (modem_powered && modem_ready){
         Paint_DrawString_EN(10, 40, "Modem +", &Font16, BLACK, WHITE);
@@ -360,6 +360,8 @@ static void Display_HandleDispEvent(bool &home_page_event, bool &command_page_ev
             EPD_3IN7_4Gray_Init();
         }
         EPD_3IN7_4Gray_Clear();
+        GRAY_MODE = 4;
+        SCALE = 4;
         paintHomeScreen();
         EPD_3IN7_4Gray_Display(reusable_buf);
 
@@ -372,8 +374,8 @@ static void Display_HandleDispEvent(bool &home_page_event, bool &command_page_ev
         home_page = true;
         idle_page = false;
         paintHomeScreen();
-        EPD_3IN7_1Gray_Display(reusable_buf);
-        DEV_Delay_ms(50);
+        //EPD_3IN7_1Gray_Display(reusable_buf);
+        //DEV_Delay_ms(50);
         return;
     }
     // Trigger idle page display
@@ -439,6 +441,7 @@ static void displayTask(void *pv) {
 
     last_activity_tick = xTaskGetTickCount();
 
+
     for (;;) {
         // Wait for event 500ms polling
         if (xQueueReceive(dispQueue, &evt, pdMS_TO_TICKS(500)) == pdTRUE) {
@@ -492,9 +495,9 @@ static void displayTask(void *pv) {
                 // Paint
                 if (home_page) {
                     //paintHomeScreen();
-                    Paint_ClearWindows(370, 0, 479, 40, WHITE);
+                    //Paint_ClearWindows(370, 0, 479, 40, WHITE);
                     Paint_DrawTime(370, 10, &sPaint_time, &Font20, WHITE, BLACK);
-                    EPD_3IN7_1Gray_Display(reusable_buf);
+                    EPD_3IN7_1Gray_Display(reusable_buf); // FLASHING CLEAR HERE FOR SOME REASON
                 }
                 if (idle_page) {
                     //Paint_DrawCircle(240, 140, (idle_page_tick_count % 30)+5, BLACK, DOT_PIXEL_1X1, DRAW_FILL_EMPTY);
@@ -517,7 +520,6 @@ static void displayTask(void *pv) {
                 }
                 DEV_Delay_ms(20);
             }
-            printf("End Partial update\r\n");
             // End Partial update
             if (epd_mutex) xSemaphoreGive(epd_mutex);  
         } 

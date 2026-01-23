@@ -162,15 +162,15 @@ void Modem_PowerOn(void) {
 bool Modem_GetGNSSRaw(char *resp, size_t resp_len, uint32_t timeoutMs) {
     if (!modem_ready) return false;
     char tmp[128];
-    // enable GNSS (some modules need this)
+    // enable GNSS
     Modem_SendAT("AT+CGNSPWR=1", tmp, sizeof(tmp), 1500);
-    vTaskDelay(pdMS_TO_TICKS(800)); // give GNSS a moment to acquire
+    vTaskDelay(pdMS_TO_TICKS(800));
     // read GNSS info
     if (!Modem_SendAT("AT+CGNSINF", resp, resp_len, timeoutMs)) return false;
     return true;
 }
 
-// Parse UTC timestamp from a +CGNSINF line into out (format as returned, e.g. YYYYMMDDHHMMSS.sss)
+// Parse UTC timestamp from a +CGNSINF line into out (YYYMMDDHHMMSS.sss)
 bool Modem_GetGNSSutc(char *out, size_t outLen, uint32_t timeoutMs) {
     const size_t TMP_SZ = 1024;
     char *tmp = (char*)malloc(TMP_SZ);
@@ -230,12 +230,7 @@ static void modemTask(void *pv) {
     char line[256];
     size_t idx = 0;
     ModemCmd *queued = NULL;
-    /*
-    uint32_t timeouts = 0;
-    size_t i = 0;
-    int c = 0;
-    */
-    printf("In modemTask\r\n"); 
+    
     for (;;) {
         // if modem not ready, wait and loop
         if (!modemSerial || !modem_ready) {
@@ -332,7 +327,7 @@ static void modemTask(void *pv) {
     }
 }
 
-// Create Mutex/Queue and start modemTask
+// Create Sem/Queue and start modemTask
 bool Modem_Init(HardwareSerial *serial, int rxPin, int txPin, int powerPin) {
     modemSerial = serial;
     modemPowerPin = powerPin;

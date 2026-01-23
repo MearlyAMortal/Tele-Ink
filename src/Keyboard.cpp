@@ -18,7 +18,7 @@ static volatile bool key_task_run = false;
 
 
 #define REG_KEY 0x00
-#define POLL_MS 50
+#define POLL_MS 100
 #define DEBOUNCE_READS 3
 
 // FD
@@ -34,7 +34,6 @@ static void handle_special_key(uint8_t &kc) {
     printf("Handling special keycode: 0x%02X, ", kc);
     switch (kc) {
         case 0x9F: { // Homescreen
-            printf("showing home now!\r\n");
             Display_Event_ShowHome();
             break; 
         }
@@ -91,9 +90,13 @@ static void keyTask(void *pv) {
     uint8_t keycode = 0;
     char key_char = '\n';
 
-    printf("keyTask started! key_task_run=%d screen_on=%d\r\n", key_task_run, screen_on);
 
     for (;;) {
+        if (false){ // debug
+            printf("keyTask alive loop\r\n");
+            DEV_Delay_ms(5000);
+            continue;
+        }
         if (!key_task_run || !screen_on) { 
             printf("keyTask waiting: key_task_run=%d screen_on=%d\r\n", key_task_run, screen_on);
             DEV_Delay_ms(1000); 
@@ -127,7 +130,6 @@ static void keyTask(void *pv) {
         // Check if FN special key (exit sequential and return to base handling)
         if (keycode != last && keycode >= 0x80 && keycode <= 0xAF) {
             last = keycode;
-            printf("Special key detected: 0x%02X\r\n", keycode);
             handle_special_key(keycode);
             if (key_queue) xQueueReset(key_queue);
             sequential_mode = false;
@@ -179,10 +181,9 @@ static void keyTask(void *pv) {
 
 static void Keyboard_Start(void){
     if (key_task) return;
-    // Set flag BEFORE creating task to avoid race condition
     key_task_run = true;
-    // Core 1, Priority 1
-    xTaskCreatePinnedToCore(keyTask, "key", 4096, NULL, 1, &key_task, 1);
+    // Core 0, Priority 1
+    xTaskCreatePinnedToCore(keyTask, "key", 4096, NULL, 1, &key_task, 0);
 }
 
 bool Keyboard_Init(TwoWire *i2cInstance, uint8_t i2cAddress){

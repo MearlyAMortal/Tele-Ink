@@ -125,6 +125,12 @@ UBYTE DEV_SPI_ReadByte()
 
 void DEV_SPI_Write_nByte(UBYTE *pData, UDOUBLE len)
 {
-    for (int i = 0; i < len; i++)
+    for (int i = 0; i < len; i++) {
         DEV_SPI_WriteByte(pData[i]);
+
+        // Yield every 64 bytes to let other tasks run
+        if (i % 64 == 0) {
+            taskYIELD();
+        }
+    }
 }

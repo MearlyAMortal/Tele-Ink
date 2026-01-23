@@ -4,7 +4,7 @@
 #include "src/Display.h"
 #include "src/Modem.h"
 #include "src/Keyboard.h"
-#include "src/ESP32_WiFi.h"
+//#include "src/ESP32_WiFi.h"
 #include "ImageData.h"
 #include "credentials.h"
 #include <stdlib.h>
@@ -14,8 +14,8 @@
 #define MODEM_TX_PIN 17
 #define MODEM_POWER_PIN -1
 #define KEYBOARD_I2C 0x5F
-#define KEYBOARD_SDA_PIN 14
-#define KEYBOARD_SCL_PIN 13
+#define KEYBOARD_SDA_PIN 21 //14 <used by screen>
+#define KEYBOARD_SCL_PIN 22 //13 <used by screen>
 
 
 
@@ -27,19 +27,15 @@ void setup() {
     Display_Init(); 
 
     // Modem
-    //Serial.printf("BUSY before modem init = %d\n", digitalRead(EPD_BUSY_PIN));
-    //Modem_Init(&Serial2, MODEM_RX_PIN, MODEM_TX_PIN, MODEM_POWER_PIN);
+    Modem_Init(&Serial2, MODEM_RX_PIN, MODEM_TX_PIN, MODEM_POWER_PIN);
 
     // Keyboard
-    /*
     uint8_t addr7 = KEYBOARD_I2C;
     Wire.begin(KEYBOARD_SDA_PIN, KEYBOARD_SCL_PIN);
     if (!Keyboard_Init(&Wire, addr7)){
         printf("Couldnt initlize keyboard!\r\n");
     }
-    */
     
-
     // WiFi
     //WiFi_StartScanner(120000);
     //WiFi_ConnectBlocking(WIFI_SSID,WIFI_PASSWORD, 15000);
@@ -47,7 +43,6 @@ void setup() {
 
 
     Display_Event_ShowHome();
-    //printf("EPD width=%d height=%d\r\n", EPD_3IN7_WIDTH, EPD_3IN7_HEIGHT);
 
     printf("Setup complete!\r\n");
 
