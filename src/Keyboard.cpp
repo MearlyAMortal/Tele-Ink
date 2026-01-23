@@ -97,8 +97,7 @@ static void keyTask(void *pv) {
             DEV_Delay_ms(5000);
             continue;
         }
-        if (!key_task_run || !screen_on) { 
-            printf("keyTask waiting: key_task_run=%d screen_on=%d\r\n", key_task_run, screen_on);
+        if (!key_task_run) { 
             DEV_Delay_ms(1000); 
             continue; 
         }
@@ -113,7 +112,7 @@ static void keyTask(void *pv) {
         // Idling detection
         if (keycode == 0x00){
             //printf("Idle\r\n");
-            if (screen_on && !timeout && !idle_page && ++timeout_count >= 120) {
+            if (screen_on && !timeout && (current_page != PAGE_IDLE) && ++timeout_count >= 120) {
                 printf("Sleep screen unless on idle_page\r\n");
                 DisplayEvent e = { .type = DISP_EVT_SLEEP, .payload = NULL};
                 Display_PostEvent(&e, 0);
@@ -141,7 +140,7 @@ static void keyTask(void *pv) {
         // read keys until exit or enter then send to command processor wait for response
         // then sends a fast event to display task to show the current buffer (no delay)
         // then send another event to show command response
-        sequential_mode = command_page;
+        sequential_mode = (current_page == PAGE_COMMAND);
 
         if (sequential_mode) { 
             if (keycode == 0x1B) { // Esc

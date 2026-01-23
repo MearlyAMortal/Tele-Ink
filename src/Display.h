@@ -18,11 +18,23 @@
 
 typedef void (*PaintFn)(UBYTE *buf, UWORD size);
 
+// Page management
+typedef enum {
+    PAGE_NONE = 0,
+    PAGE_HOME,
+    PAGE_IDLE,
+    PAGE_COMMAND,
+} PageType;
+
+extern PageType current_page;
+
+
 extern bool screen_on;
+/*
 extern bool home_page;
 extern bool command_page;
 extern bool idle_page;
-
+*/
 
 extern uint32_t command_page_lines;
 extern char **command_page_data;

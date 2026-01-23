@@ -1,12 +1,14 @@
 #include "Display.h"
 #include "ESP32_WiFi.h"
-#include <WiFi.h>
+//#include <WiFi.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 static TaskHandle_t wifi_scan_task = NULL;
 static uint32_t scan_interval = 60000;
 
+// Save upload speed?
+/*
 static void wifiScanTask(void *pv) {
     (void)pv;
     for (;;) {
@@ -52,3 +54,4 @@ bool WiFi_ConnectBlocking(const char *ssid, const char *pass, uint32_t timeout_m
     Serial.println("WiFi connect timeout/fail");
     return false;
 }
+    */

@@ -7,12 +7,13 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
-
+// Pins
 static HardwareSerial *modemSerial = nullptr;
 static uint8_t modemPowerPin = -1;
 static uint8_t modem_rx_pin = -1;
 static uint8_t modem_tx_pin = -1;
 
+// Modem state
 static SemaphoreHandle_t modem_mutex = NULL;
 static TaskHandle_t modem_task_handle = NULL;
 static QueueHandle_t modem_cmd_queue = NULL;
@@ -27,23 +28,23 @@ static bool modem_ready = false;
 static bool modem_serial_begun = false;
 static bool modem_idle = false;
 
-//static uint32_t idle_count = 0;
-
 
 // FD
-static void modemTask(void *pv);
 static void Modem_StartTask(void);
-
-
-
+static bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeoutMs);
+static bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeoutMs);
+static bool Modem_AT(void);
+static void Modem_HandleURC(const char *line);
+static bool Modem_GetGNSSRaw(char *resp, size_t resp_len, uint32_t timeoutMs);
+static bool Modem_GetGNSSutc(char *out, size_t outLen, uint32_t timeoutMs);
+static bool Modem_CheckNetwork(void);
+static void modemTask(void *pv);
 
 
 static void Modem_StartTask(void) {
     // Core 1, Priority 2
     xTaskCreatePinnedToCore(modemTask, "modem", 8192, NULL, 2, &modem_task_handle, 1);
 }
-
-
 
 
 void Modem_PowerOff(void) {
@@ -55,7 +56,7 @@ void Modem_PowerOff(void) {
 }
 
 
-bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeoutMs) {
+static bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeoutMs) {
     if (!modemSerial || !modem_ready) return false;
     // Try to take the mutex so we don't collide with modemTask sending an AT cmd.
     if (modem_mutex) {
@@ -68,7 +69,7 @@ bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeoutMs) {
 }
 
 // Sends AT command to modem and waits for response. (safe)
-bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeoutMs) {
+static bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeoutMs) {
     if (!modemSerial || !cmd || !resp || resp_len == 0) return false;
     ModemCmd *r = (ModemCmd*)malloc(sizeof(ModemCmd)); // Heap
     if (!r) return false;
@@ -107,7 +108,7 @@ bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeout
     return ok;
 }
 
-bool Modem_AT(void){
+static bool Modem_AT(void){
     if (!modem_serial_begun) return false;
     char resp[64];
     if (!Modem_SendAT("AT", resp, sizeof(resp), 3000)) {
@@ -123,7 +124,6 @@ bool Modem_AT(void){
 }
 
 void Modem_PowerOn(void) {
-    printf("Modem_PowerOn attempt\r\n");
     if (modemPowerPin >= 0) {
         digitalWrite(modemPowerPin, HIGH);
         DEV_Delay_ms(1000);
@@ -158,8 +158,16 @@ void Modem_PowerOn(void) {
     
 }
 
+static void Modem_HandleURC(const char *line) {
+    if (strstr(line, "+CREG: OK")) {
+        DisplayEvent e = { .type = DISP_EVT_MODEM_NET, .payload = NULL };
+        Display_PostEvent(&e, 0);
+    }
+}
+
+
 // Request GNSS on, get raw +CGNSINF (SIMCOM-style) into resp
-bool Modem_GetGNSSRaw(char *resp, size_t resp_len, uint32_t timeoutMs) {
+static bool Modem_GetGNSSRaw(char *resp, size_t resp_len, uint32_t timeoutMs) {
     if (!modem_ready) return false;
     char tmp[128];
     // enable GNSS
@@ -171,7 +179,7 @@ bool Modem_GetGNSSRaw(char *resp, size_t resp_len, uint32_t timeoutMs) {
 }
 
 // Parse UTC timestamp from a +CGNSINF line into out (YYYMMDDHHMMSS.sss)
-bool Modem_GetGNSSutc(char *out, size_t outLen, uint32_t timeoutMs) {
+static bool Modem_GetGNSSutc(char *out, size_t outLen, uint32_t timeoutMs) {
     const size_t TMP_SZ = 1024;
     char *tmp = (char*)malloc(TMP_SZ);
     if (!tmp) return false;
@@ -205,24 +213,27 @@ bool Modem_GetGNSSutc(char *out, size_t outLen, uint32_t timeoutMs) {
     return ok;
 }
 
-bool Modem_CheckNetwork(void) {
+static bool Modem_CheckNetwork(void) {
     if (!modem_ready) {
         printf("Modem_CheckNetwork: modem is off, skipping\r\n");
         return false;
     }
-    char resp[1024];
-    if (!Modem_SendAT("AT+CGATT?", resp, sizeof(resp), 3000)) {
+    char resp[512];
+    if (!Modem_SendAT("AT+CREG?", resp, sizeof(resp), 3000)) {
         printf("AT send Timeout or no valid response\r\n");
         return false;
     }
-    if (strstr(resp, "+CGATT: 1")) {
-        DisplayEvent e = { .type = DISP_EVT_MODEM_NET, .payload = NULL };
-        Display_PostEvent(&e, 0);
+    if (strstr(resp, "+CREG: OK")) {
+        Modem_HandleURC(resp);
         return true;
     }
     printf("Modem Network: No %s\r\n", resp);
     return false;
 }
+
+
+
+
 
 /* FreeRTOS task that reads URCs / unsolicited modem lines */
 static void modemTask(void *pv) {
@@ -296,11 +307,7 @@ static void modemTask(void *pv) {
                     }
                 } else {
                     // unsolicited URC handling (non-blocking)
-                    if (strstr(line, "+CGATT: 1") || strstr(line, "+CREG: 1") || strstr(line, "+CEREG: 1")) {
-                        DisplayEvent e = { .type = DISP_EVT_MODEM_NET, .payload = NULL };
-                        Display_PostEvent(&e, 0);
-                    }
-                    // other URC handling as needed...
+                    Modem_HandleURC(line);
                 }
 
                 idx = 0;
@@ -342,7 +349,6 @@ bool Modem_Init(HardwareSerial *serial, int rxPin, int txPin, int powerPin) {
 
     if (modemSerial) {
         Modem_PowerOn();
-        // spawn background task that listens for URCs
         Modem_StartTask();
 
         // DEBUG

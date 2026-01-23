@@ -15,6 +15,7 @@
 
 // Public
 bool screen_on = false;
+
 bool home_page = false;
 bool command_page = false;
 bool idle_page = false;
@@ -35,12 +36,12 @@ static UBYTE *reusable_buf = NULL;
 static UWORD reusable_size = 0;
 static uint8_t GRAY_MODE = 4;
 static uint8_t SCALE = 4;
-
 static uint32_t idle_timeout_ms = 60000; //One minute
 static int idle_timeout_count = 0; 
 static TickType_t last_activity_tick = 0;
-
 static uint32_t idle_page_tick_count = 0;
+
+
 
 // Modem
 static bool modem_ready = false;
@@ -55,15 +56,17 @@ static bool wifi_connected = false;
 static bool wifi_on = false;
 
 // FD
+PageType current_page = PAGE_NONE;
 static UWORD getImageSize(void);
 static void paintHomeScreen(void);
 static void paintCommandScreen(void);
 static void paintBlankScreen(void);
 static void paintBootScreen(void);
 static void paintPhoneScreen(void);
+static void Display_StartTask(void);
 //static void powerOn(void);
 //static void powerOff(void);
-static void Display_HandleDispEvent(bool &home_page_event, bool &command_page_event, bool &idle_page_event);
+static void Display_HandleScreenEvent(void);
 static void displayTask(void *pv);
 static void Display_Sleep(bool clear_screen);
 static void Display_Wake(void);
@@ -111,11 +114,7 @@ static void paintPhoneScreen(void) {
 static void paintHomeScreen(void) {
     if (!reusable_buf) return;
     Paint_SelectImage(reusable_buf);
-    if (GRAY_MODE == 4){
-        Paint_SetScale(4);
-    } else {
-        Paint_SetScale(2);
-    }
+    Paint_SetScale(SCALE);
     
     Paint_Clear(WHITE);
     // title
@@ -142,16 +141,11 @@ static void paintHomeScreen(void) {
     }
     
      
-    //Paint_DrawString_EN(10, 80, "BT Offline", &Font16, BLACK, WHITE);
 }
 static void paintCommandScreen(void) {
     if (!reusable_buf) return;
     Paint_SelectImage(reusable_buf);
-    if (GRAY_MODE == 4){
-        Paint_SetScale(4);
-    } else {
-        Paint_SetScale(2);
-    }
+    Paint_SetScale(SCALE);
     Paint_Clear(WHITE);
     // Text area
     /*
@@ -168,11 +162,7 @@ static void paintCommandScreen(void) {
 static void paintBlankScreen(void) {
     if (!reusable_buf) return;
     Paint_SelectImage(reusable_buf);
-    if (GRAY_MODE == 4){
-        Paint_SetScale(4);
-    } else {
-        Paint_SetScale(2);
-    }
+    Paint_SetScale(SCALE);
     Paint_Clear(WHITE);
 }
 static void paintBootScreen(void) {
@@ -202,7 +192,29 @@ static void paintBootScreen(void) {
     Paint_DrawString_EN(10, 225, "GRAY4 with white background", &Font24, WHITE, GRAY4);
 }
 
-/* Initilize the display and reset screen then put to sleep */
+// Page management
+static void setPage(PageType page) {
+    current_page = page;
+}
+
+static void paintCurrentPage(void) {
+    switch (current_page) {
+        case PAGE_HOME:    paintHomeScreen(); break;
+        case PAGE_IDLE:    paintBlankScreen(); break;
+        case PAGE_COMMAND: paintCommandScreen(); break;
+        default: break;
+    }
+}
+
+
+static void Display_StartTask(void) {
+    if (display_task_handle) return;
+    screen_on = true;
+    //Core 0, Priority 2
+    xTaskCreatePinnedToCore(displayTask, "display", 8192, NULL, 2, &display_task_handle, 0);
+}
+
+/* Initilize the display with boot screen */
 void Display_Init(void) {
     //Mutex creation for displayTask
     if (!epd_mutex) {
@@ -248,9 +260,8 @@ void Display_Init(void) {
             return;
         }
     }
-    screen_on = true;
-    //Core 0, Priority 2
-    xTaskCreatePinnedToCore(displayTask, "display", 8192, NULL, 2, &display_task_handle, 0);
+    
+    Display_StartTask();
 }
 // Deinit: shutdown and free resources (free buffer & delete mutex) (ASSUMES MUTEX IS HELD)
 void Display_Deinit(void) {
@@ -315,9 +326,7 @@ static void Display_Sleep(bool clear_screen) {
 
     if (clear_screen) {
         EPD_3IN7_4Gray_Clear();
-        home_page = false;
-        command_page = false;
-        idle_page = false;
+        setPage(PAGE_NONE);
     }
         
     EPD_3IN7_Sleep();
@@ -353,85 +362,37 @@ void Display_Event_WifiConnected() {
     Display_PostEvent(&e, 0);
 }
 
-static void Display_HandleDispEvent(bool &home_page_event, bool &command_page_event, bool &idle_page_event) {
-    // Trigger home page display
-    if (home_page_event){
-        if (GRAY_MODE == 1) {
-            EPD_3IN7_4Gray_Init();
-        }
-        EPD_3IN7_4Gray_Clear();
-        GRAY_MODE = 4;
-        SCALE = 4;
-        paintHomeScreen();
-        EPD_3IN7_4Gray_Display(reusable_buf);
+static void Display_HandleScreenEvent(void) {
+    if (current_page == PAGE_NONE) return;
 
-        DEV_Delay_ms(20);
-        EPD_3IN7_1Gray_Init();
-        GRAY_MODE = 1;
-        SCALE = 2;
-        home_page_event = false;
-        command_page = false;
-        home_page = true;
-        idle_page = false;
-        paintHomeScreen();
-        //EPD_3IN7_1Gray_Display(reusable_buf);
-        //DEV_Delay_ms(50);
-        return;
-    }
-    // Trigger idle page display
-    if (idle_page_event) {
-        if (GRAY_MODE == 1) {
-            EPD_3IN7_4Gray_Init();
-        }
-        EPD_3IN7_4Gray_Clear();
-        //paintBlankScreen();
-        //EPD_3IN7_4Gray_Display(reusable_buf);
-
-        DEV_Delay_ms(20);
-        EPD_3IN7_1Gray_Init();
-        GRAY_MODE = 1;
-        SCALE = 2;
-        idle_page_event = false;
-        command_page = false;
-        home_page = false;
-        idle_page = true;
-        paintBlankScreen();
-        EPD_3IN7_1Gray_Display(reusable_buf);
+    if (GRAY_MODE == 1) {
+        EPD_3IN7_4Gray_Init();
         DEV_Delay_ms(50);
-        return;
     }
-    // Trigger command page display
-    if (command_page_event) {
-        if (GRAY_MODE == 1) {
-            EPD_3IN7_4Gray_Init();
-        }
-        EPD_3IN7_4Gray_Clear();
-        paintCommandScreen();
-        EPD_3IN7_4Gray_Display(reusable_buf);
+    // 4Gray Clear screen first
+    EPD_3IN7_4Gray_Clear();
+    DEV_Delay_ms(20);
+    GRAY_MODE = 4;
+    SCALE = 4;
 
-        DEV_Delay_ms(20);
+    // Display in 4 gray
+    paintCurrentPage();
+    EPD_3IN7_4Gray_Display(reusable_buf);
+    DEV_Delay_ms(20);
+    
+    // Start partial updates if needed
+    if (current_page == PAGE_HOME || current_page == PAGE_IDLE || current_page == PAGE_COMMAND) {
+        // Switch to 1 gray for partial updates
         EPD_3IN7_1Gray_Init();
+        DEV_Delay_ms(20);
         GRAY_MODE = 1;
         SCALE = 2;
-        command_page_event = false;
-        command_page = true;
-        home_page = false;
-        idle_page = false;
-        paintCommandScreen();
-        EPD_3IN7_1Gray_Display(reusable_buf);
-        DEV_Delay_ms(50);
-        return;
     }
-    printf("Display_HandleDispEvent: No display event to handle\r\n");
-    return;
 }
 
 /* display task processes events and updates screen on demand */
 static void displayTask(void *pv) {
     (void)pv;
-    bool home_page_event = false;
-    bool command_page_event = false;
-    bool idle_page_event = false;
     //PAINT_TIME <- Modem;
     DisplayEvent evt;
     PAINT_TIME sPaint_time;
@@ -459,9 +420,9 @@ static void displayTask(void *pv) {
                     Display_Sleep(false);
                     if (epd_mutex) xSemaphoreGive(epd_mutex);
                     continue;
-                case DISP_EVT_SHOW_HOME: home_page_event = true; break;
-                case DISP_EVT_SHOW_COMMAND: command_page_event = true; break;
-                case DISP_EVT_SHOW_IDLE: idle_page_event = true; break;
+                case DISP_EVT_SHOW_HOME: setPage(PAGE_HOME); break;
+                case DISP_EVT_SHOW_COMMAND: setPage(PAGE_COMMAND); break;
+                case DISP_EVT_SHOW_IDLE: setPage(PAGE_IDLE); break;
                 case DISP_EVT_WIFI_ON: wifi_on = true; break;
                 case DISP_EVT_WIFI_CONNECTED: wifi_connected = true; break; 
                 case DISP_EVT_MODEM_POWERED: modem_powered = true; break;
@@ -472,13 +433,13 @@ static void displayTask(void *pv) {
             }
 
             if (reusable_buf) {
-                // Start screen update
+                // Chirp screen awake
                 if(!screen_on){
                     printf("Wakeup screen\r\n");
                     Display_Wake();
                 }
-                // Draw appropriate screen
-                Display_HandleDispEvent(home_page_event, command_page_event, idle_page_event);
+                // Handle drawing appropriate screen
+                Display_HandleScreenEvent();
             } else {
                 printf("ERROR with display buffer\r\n");
             }
@@ -493,13 +454,13 @@ static void displayTask(void *pv) {
             // Start Partial update
             if (epd_mutex && xSemaphoreTake(epd_mutex, pdMS_TO_TICKS(2000)) == pdTRUE){
                 // Paint
-                if (home_page) {
-                    //paintHomeScreen();
+                paintCurrentPage();
+                if (current_page == PAGE_HOME) {
                     //Paint_ClearWindows(370, 0, 479, 40, WHITE);
                     Paint_DrawTime(370, 10, &sPaint_time, &Font20, WHITE, BLACK);
                     EPD_3IN7_1Gray_Display(reusable_buf); // FLASHING CLEAR HERE FOR SOME REASON
                 }
-                if (idle_page) {
+                if (current_page == PAGE_IDLE) {
                     //Paint_DrawCircle(240, 140, (idle_page_tick_count % 30)+5, BLACK, DOT_PIXEL_1X1, DRAW_FILL_EMPTY);
                     Paint_ClearWindows(200, 100, 280, 180, WHITE);
                     if ( idle_page_tick_count % 3 == 0 ){
@@ -512,7 +473,7 @@ static void displayTask(void *pv) {
                     EPD_3IN7_1Gray_Display(reusable_buf);
                     ++idle_page_tick_count;
                 }
-                if (command_page) { 
+                if (current_page == PAGE_COMMAND) { 
                     //paintCommandScreen();
                     //Paint_ClearWindows(10, 200, 270, 280, WHITE);
                     //Paint_DrawTime(200, 210, &sPaint_time, &Font16, WHITE, BLACK);
@@ -531,11 +492,6 @@ static void displayTask(void *pv) {
             ++idle_timeout_count;
         }
 
-        // Idle page display
-        if (idle_timeout_count == 3 && screen_on && !idle_page){
-            Display_Event_ShowIdle();
-        }
-            
         // No activity sleeping ?
         if (idle_timeout_count >= 5 && screen_on){
             Display_Sleep(false); 
