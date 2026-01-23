@@ -1,0 +1,10 @@
+.pio
+.vscode
+**/.DS_Store
+
+
+ImageData.h
+ImageData.c
+electronic
+
+credentials.h
