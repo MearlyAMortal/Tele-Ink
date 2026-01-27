@@ -12,22 +12,16 @@
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 
+#define POLL_MS 100
 
 // Public
 bool screen_on = false;
-
-bool home_page = false;
-bool command_page = false;
-bool idle_page = false;
-
-
-// Command page data
-uint32_t command_page_lines = 0;
-char **command_page_data = NULL;
-char *command_send = NULL;
-char *command_resp = NULL;
+PageType current_page = PAGE_NONE;
+PageType last_page = PAGE_NONE;
+CommandBuffer cmd_buffer = {0};
 
 
+// Private
 // Screen
 static SemaphoreHandle_t epd_mutex = NULL;
 static QueueHandle_t dispQueue = NULL;
@@ -41,8 +35,6 @@ static int idle_timeout_count = 0;
 static TickType_t last_activity_tick = 0;
 static uint32_t idle_page_tick_count = 0;
 
-
-
 // Modem
 static bool modem_ready = false;
 static bool modem_net = false;
@@ -55,22 +47,20 @@ static TickType_t end = 0;
 static bool wifi_connected = false;
 static bool wifi_on = false;
 
-// FD
-PageType current_page = PAGE_NONE;
+// FD Painting functions
 static UWORD getImageSize(void);
 static void paintHomeScreen(void);
 static void paintCommandScreen(void);
 static void paintBlankScreen(void);
 static void paintBootScreen(void);
 static void paintPhoneScreen(void);
+// FD Display task functions
 static void Display_StartTask(void);
-//static void powerOn(void);
-//static void powerOff(void);
-static void Display_HandleScreenEvent(void);
+static void Display_HandleScreenChange(void);
+static void Display_HandlePartialUpdate(PAINT_TIME &spaintime);
 static void displayTask(void *pv);
 static void Display_Sleep(bool clear_screen);
 static void Display_Wake(void);
-
 
 
 
@@ -78,26 +68,7 @@ static UWORD getImageSize(void) {
     return ((EPD_3IN7_WIDTH % 4 == 0) ? (EPD_3IN7_WIDTH / 4) : (EPD_3IN7_WIDTH / 4 + 1)) * EPD_3IN7_HEIGHT;
 }
 
-/*
-static void powerOn(void) {
-    if (DISPLAY_PWR_PIN >= 0) {
-        pinMode(DISPLAY_PWR_PIN, OUTPUT);
-        digitalWrite(DISPLAY_PWR_PIN, HIGH);
-        DEV_Delay_ms(10);
-    }
-    screen_on = true;
-}
-static void powerOff(void) {
-    if (DISPLAY_PWR_PIN >= 0) {
-        digitalWrite(DISPLAY_PWR_PIN, LOW);
-        DEV_Delay_ms(10);
-    }
-    screen_on = false;
-}
-*/
-
-
-/* draw the specific screen into reusable_buf (caller must hold mutex) */
+// Post event to display task
 static void paintPhoneScreen(void) {
     if (!reusable_buf) return;
     Paint_SelectImage(reusable_buf);
@@ -194,9 +165,9 @@ static void paintBootScreen(void) {
 
 // Page management
 static void setPage(PageType page) {
+    last_page = current_page;
     current_page = page;
 }
-
 static void paintCurrentPage(void) {
     switch (current_page) {
         case PAGE_HOME:    paintHomeScreen(); break;
@@ -207,97 +178,12 @@ static void paintCurrentPage(void) {
 }
 
 
-static void Display_StartTask(void) {
-    if (display_task_handle) return;
-    screen_on = true;
-    //Core 0, Priority 2
-    xTaskCreatePinnedToCore(displayTask, "display", 8192, NULL, 2, &display_task_handle, 0);
-}
-
-/* Initilize the display with boot screen */
-void Display_Init(void) {
-    //Mutex creation for displayTask
-    if (!epd_mutex) {
-        epd_mutex = xSemaphoreCreateMutex();
-        if (!epd_mutex) {
-            printf("ERROR: Failed to create epd_mutex!\r\n");
-            return;
-        }
-    }
-
-    if (GRAY_MODE != 4){
-        printf("ERROR: Expected GRAY_MODE 4\r\n");
-        return;
-    } 
-    //powerOn();
-    
-    //Init EPD
-    EPD_3IN7_4Gray_Init();
-    EPD_3IN7_4Gray_Clear();
-    DEV_Delay_ms(500);
-
-    reusable_size = getImageSize();
-    if((reusable_buf = (UBYTE *)malloc(reusable_size)) == NULL) {
-        printf("ERROR: Failed to allocate reusable_buf (%u bytes)\r\n", reusable_size);
-        return;
-    }
-    
-    // create an empty canvas so paint APIs are ready to use
-    Paint_NewImage(reusable_buf, EPD_3IN7_WIDTH, EPD_3IN7_HEIGHT, 270, WHITE);
-    
-    DEV_Delay_ms(200);
-
-    // Just start with displaying boot screen
-    paintBootScreen();
-    EPD_3IN7_4Gray_Display(reusable_buf);
-    DEV_Delay_ms(1000);
-
-    // create queue & task
-    if (!dispQueue) {
-        dispQueue = xQueueCreate(8, sizeof(DisplayEvent));
-        if (!dispQueue) {
-            printf("ERROR: Failed to create dispQueue!\r\n");
-            return;
-        }
-    }
-    
-    Display_StartTask();
-}
-// Deinit: shutdown and free resources (free buffer & delete mutex) (ASSUMES MUTEX IS HELD)
-void Display_Deinit(void) {
-    if (!screen_on) {
-        Display_Wake();
-    } 
-    Display_Sleep(true);
-
-    // Stop the display task if we created it (and it's not the caller)
-    if (display_task_handle && display_task_handle != xTaskGetCurrentTaskHandle()) {
-        printf("Display_Deinit: deleting display task\n");
-        vTaskDelete(display_task_handle);
-        display_task_handle = NULL;
-    } else if (display_task_handle == xTaskGetCurrentTaskHandle()) {
-        // clear handle so others know it's gone
-        display_task_handle = NULL;
-    }
-
-    if (dispQueue) {
-        vQueueDelete(dispQueue);
-        dispQueue = NULL;
-    }
-    if (reusable_buf) {
-        free(reusable_buf);
-        reusable_buf = NULL;
-        reusable_size = 0;
-    }
-}
-
 // Wakes screen from sleep and clears paint(ASSUMES mutex is taken!)
 static void Display_Wake(void) {
     if (screen_on) {
         printf("Display_Wake: screen is on\r\n"); 
         return;
     }
-    //powerOn();
 
     EPD_3IN7_4Gray_Init();
 
@@ -312,7 +198,7 @@ static void Display_Wake(void) {
     DEV_Delay_ms(50);
     screen_on = true;
 
-    printf("Display_Wake: Painting\r\n");
+    printf("Woke display\r\n");
     Paint_SelectImage(reusable_buf);
     Paint_SetScale(SCALE);
     Paint_Clear(WHITE);
@@ -330,39 +216,51 @@ static void Display_Sleep(bool clear_screen) {
     }
         
     EPD_3IN7_Sleep();
-    printf("Display_Sleep: Slept\r\n");
+    printf("Slept display\r\n");
     DEV_Delay_ms(50);
-    //powerOff();
     screen_on = false;
 }
 
-
-
-
-/* post event to queue */
+// Post event to display task
 bool Display_PostEvent(const DisplayEvent *evt, TickType_t ticksToWait) {
     if (!dispQueue) return false;
     return xQueueSend(dispQueue, evt, ticksToWait) == pdTRUE;
 }
-/* Add display events to queue from outside display*/
-void Display_Event_ShowHome() {
+// Public event calls
+void Display_Event_Sleep(void) {
+    DisplayEvent e = { .type = DISP_EVT_SLEEP, .payload = NULL};
+    Display_PostEvent(&e, 0);
+}
+void Display_Event_ShowHome(void) {
     DisplayEvent e = { .type = DISP_EVT_SHOW_HOME, .payload = NULL};
     Display_PostEvent(&e, 0);
 }
-void Display_Event_ShowCommand() {
+void Display_Event_ShowCommand(void) {
     DisplayEvent e = { .type = DISP_EVT_SHOW_COMMAND, .payload = NULL};
     Display_PostEvent(&e, 0);
 }
-void Display_Event_ShowIdle(){
+void Display_Event_ShowIdle(void){
     DisplayEvent e = { .type = DISP_EVT_SHOW_IDLE, .payload = NULL};
     Display_PostEvent(&e, 0);
 }
-void Display_Event_WifiConnected() {
+void Display_Event_WifiConnected(void) {
     DisplayEvent e = { .type = DISP_EVT_WIFI_CONNECTED, .payload = NULL};
     Display_PostEvent(&e, 0);
 }
 
-static void Display_HandleScreenEvent(void) {
+void Display_ClearCommandHistory(void) {
+    if (cmd_buffer.mutex && xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        cmd_buffer.history_count = 0;
+        for (int i = 0; i < CMD_HISTORY_LINES; i++) {
+            cmd_buffer.history[i][0] = '\0';
+        }
+        xSemaphoreGive(cmd_buffer.mutex);
+    }
+}
+
+
+
+static void Display_HandleScreenChange(void) {
     if (current_page == PAGE_NONE) return;
 
     if (GRAY_MODE == 1) {
@@ -371,26 +269,96 @@ static void Display_HandleScreenEvent(void) {
     }
     // 4Gray Clear screen first
     EPD_3IN7_4Gray_Clear();
-    DEV_Delay_ms(20);
+    DEV_Delay_ms(50);
     GRAY_MODE = 4;
     SCALE = 4;
 
-    // Display in 4 gray
+    // Display background in 4 gray
     paintCurrentPage();
     EPD_3IN7_4Gray_Display(reusable_buf);
-    DEV_Delay_ms(20);
+    DEV_Delay_ms(100);
     
     // Start partial updates if needed
     if (current_page == PAGE_HOME || current_page == PAGE_IDLE || current_page == PAGE_COMMAND) {
         // Switch to 1 gray for partial updates
         EPD_3IN7_1Gray_Init();
-        DEV_Delay_ms(20);
+        DEV_Delay_ms(50);
         GRAY_MODE = 1;
         SCALE = 2;
     }
 }
 
-/* display task processes events and updates screen on demand */
+static void Display_HandlePartialUpdate(PAINT_TIME &spaintime) {
+    // Start Partial update
+    if (epd_mutex && xSemaphoreTake(epd_mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+        // Paint
+        paintCurrentPage();
+        if (current_page == PAGE_HOME) {
+            // Paint_ClearWindows(370, 0, 479, 40, WHITE);
+            //Paint_DrawTime(370, 10, &spaintime, &Font20, WHITE, BLACK);
+            EPD_3IN7_1Gray_Display(reusable_buf); // FLASHING CLEAR HERE FOR SOME REASON
+        }
+        if (current_page == PAGE_IDLE) {
+            // Paint_DrawCircle(240, 140, (idle_page_tick_count % 30)+5, BLACK, DOT_PIXEL_1X1, DRAW_FILL_EMPTY);
+            Paint_ClearWindows(200, 100, 280, 180, WHITE);
+            if (idle_page_tick_count % 3 == 0) {
+                Paint_DrawPoint(240, 140, BLACK, DOT_PIXEL_2X2, DOT_STYLE_DFT);
+            }
+            else if (idle_page_tick_count % 3 == 1) {
+                Paint_DrawPoint(240, 140, BLACK, DOT_PIXEL_3X3, DOT_STYLE_DFT);
+            }
+            else {
+                Paint_DrawPoint(240, 140, BLACK, DOT_PIXEL_5X5, DOT_STYLE_DFT);
+            }
+            EPD_3IN7_1Gray_Display(reusable_buf);
+            ++idle_page_tick_count;
+        }
+        if (current_page == PAGE_COMMAND) {
+            // Copy data from cmd_buffer while holding mutex briefly
+            char current_input[CMD_BUFFER_SIZE];
+            char history_copy[CMD_HISTORY_LINES][CMD_BUFFER_SIZE];
+            int history_count = 0;
+            
+            if (cmd_buffer.mutex && xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                strcpy(current_input, cmd_buffer.input);
+                history_count = cmd_buffer.history_count;
+                for (int i = 0; i < history_count && i < CMD_HISTORY_LINES; i++) {
+                    strcpy(history_copy[i], cmd_buffer.history[i]);
+                }
+                xSemaphoreGive(cmd_buffer.mutex);
+            } else {
+                printf("Display: failed to take cmd_buffer.mutex\r\n");
+                current_input[0] = '\0';
+                history_count = 0;
+            }
+            
+            int input_y = 250;
+            
+            // Draw current input with cursor at fixed bottom position
+            char display_line[CMD_BUFFER_SIZE + 2];
+            snprintf(display_line, sizeof(display_line), "> %s_", current_input);
+            
+            Paint_DrawString_EN(5, input_y, display_line, &Font16, WHITE, BLACK);
+            
+            // Draw history scrolling upward from above the input line
+            int lines_to_show = (input_y - 35) / 18;
+            int start_idx = (history_count > lines_to_show) ? (history_count - lines_to_show) : 0;
+            
+            int y = input_y - 18;
+            for (int i = history_count - 1; i >= start_idx; i--) {
+                Paint_DrawString_EN(5, y, history_copy[i], &Font16, BLACK, WHITE);
+                y -= 18;
+            }
+            
+            EPD_3IN7_1Gray_Display(reusable_buf);
+        }
+        DEV_Delay_ms(20);
+        // End Partial update
+        if (epd_mutex) xSemaphoreGive(epd_mutex);
+    }
+}
+
+// Display task
 static void displayTask(void *pv) {
     (void)pv;
     //PAINT_TIME <- Modem;
@@ -405,9 +373,9 @@ static void displayTask(void *pv) {
 
     for (;;) {
         // Wait for event 500ms polling
-        if (xQueueReceive(dispQueue, &evt, pdMS_TO_TICKS(500)) == pdTRUE) {
+        if (xQueueReceive(dispQueue, &evt, pdMS_TO_TICKS(300)) == pdTRUE) {
             // Take screen mutex
-            if (!epd_mutex || (xSemaphoreTake(epd_mutex, pdMS_TO_TICKS(2000)) != pdTRUE)) {
+            if (!epd_mutex || (xSemaphoreTake(epd_mutex, pdMS_TO_TICKS(1000)) != pdTRUE)) {
                 printf("displayTask: failed to take epd_mutex for event (timeout)\r\n");
                 continue;
             }
@@ -416,7 +384,7 @@ static void displayTask(void *pv) {
             idle_timeout_count = 0;
             // update internal state based on event
             switch (evt.type) {
-                case DISP_EVT_SLEEP: // Keyboard low activity 
+                case DISP_EVT_SLEEP:
                     Display_Sleep(false);
                     if (epd_mutex) xSemaphoreGive(epd_mutex);
                     continue;
@@ -427,19 +395,22 @@ static void displayTask(void *pv) {
                 case DISP_EVT_WIFI_CONNECTED: wifi_connected = true; break; 
                 case DISP_EVT_MODEM_POWERED: modem_powered = true; break;
                 case DISP_EVT_MODEM_READY: modem_ready = true; modem_powered = true; break;
-                case DISP_EVT_MODEM_NET: modem_net = true; break;
+                case DISP_EVT_MODEM_NET: modem_ready = true; modem_powered = true; modem_net = true; break;
                 case DISP_EVT_SMS_RECEIVED: ++unread_sms; break;
                 case DISP_EVT_RING: ringing = true; break;
             }
 
+            // Wake display if needed and draw new screen if page changed
             if (reusable_buf) {
                 // Chirp screen awake
-                if(!screen_on){
-                    printf("Wakeup screen\r\n");
-                    Display_Wake();
-                }
+                if(!screen_on) Display_Wake();
                 // Handle drawing appropriate screen
-                Display_HandleScreenEvent();
+                if (last_page != current_page) {
+                    printf("Screen change detected: %d -> %d\r\n", last_page, current_page);
+                    Display_HandleScreenChange();
+                } else {
+                    printf("No screen change detected: %d\r\n", current_page);
+                }
             } else {
                 printf("ERROR with display buffer\r\n");
             }
@@ -451,38 +422,7 @@ static void displayTask(void *pv) {
 
         // Partial update screen EPD width=280 height=480
         if (GRAY_MODE == 1 && screen_on) {
-            // Start Partial update
-            if (epd_mutex && xSemaphoreTake(epd_mutex, pdMS_TO_TICKS(2000)) == pdTRUE){
-                // Paint
-                paintCurrentPage();
-                if (current_page == PAGE_HOME) {
-                    //Paint_ClearWindows(370, 0, 479, 40, WHITE);
-                    Paint_DrawTime(370, 10, &sPaint_time, &Font20, WHITE, BLACK);
-                    EPD_3IN7_1Gray_Display(reusable_buf); // FLASHING CLEAR HERE FOR SOME REASON
-                }
-                if (current_page == PAGE_IDLE) {
-                    //Paint_DrawCircle(240, 140, (idle_page_tick_count % 30)+5, BLACK, DOT_PIXEL_1X1, DRAW_FILL_EMPTY);
-                    Paint_ClearWindows(200, 100, 280, 180, WHITE);
-                    if ( idle_page_tick_count % 3 == 0 ){
-                       Paint_DrawPoint(240, 140, BLACK, DOT_PIXEL_2X2, DOT_STYLE_DFT); 
-                    } else  if ( idle_page_tick_count % 3 == 1 ) {
-                        Paint_DrawPoint(240, 140, BLACK, DOT_PIXEL_3X3, DOT_STYLE_DFT);
-                    } else {
-                        Paint_DrawPoint(240, 140, BLACK, DOT_PIXEL_5X5, DOT_STYLE_DFT);
-                    }
-                    EPD_3IN7_1Gray_Display(reusable_buf);
-                    ++idle_page_tick_count;
-                }
-                if (current_page == PAGE_COMMAND) { 
-                    //paintCommandScreen();
-                    //Paint_ClearWindows(10, 200, 270, 280, WHITE);
-                    //Paint_DrawTime(200, 210, &sPaint_time, &Font16, WHITE, BLACK);
-                    //EPD_3IN7_1Gray_Display(reusable_buf);
-                }
-                DEV_Delay_ms(20);
-            }
-            // End Partial update
-            if (epd_mutex) xSemaphoreGive(epd_mutex);  
+            Display_HandlePartialUpdate(sPaint_time);
         } 
         
         // Track low activity
@@ -497,9 +437,71 @@ static void displayTask(void *pv) {
             Display_Sleep(false); 
         }
 
-        DEV_Delay_ms(10);
+        DEV_Delay_ms(50);
     }
 }
 
 
 
+static void Display_StartTask(void) {
+    if (display_task_handle) return;
+    screen_on = true;
+    //Core 0, Priority 2
+    xTaskCreatePinnedToCore(displayTask, "display", 8192, NULL, 2, &display_task_handle, 0);
+}
+
+// Initialize display ds and start display task (does not send any events)
+void Display_Init(void) {
+    // Mutex creation for displayTask and command buffer
+    if (!epd_mutex && !cmd_buffer.mutex) {
+        epd_mutex = xSemaphoreCreateMutex();
+        cmd_buffer.mutex = xSemaphoreCreateMutex();
+        if (!epd_mutex || !cmd_buffer.mutex) {
+            printf("ERROR: Failed to create necessary mutex for display!\r\n");
+            return;
+        }
+    }
+    
+    // Command buffer init
+    cmd_buffer.input[0] = '\0';
+    cmd_buffer.output[0] = '\0';
+    cmd_buffer.history_count = 0;
+    cmd_buffer.state = CMD_STATE_IDLE;
+
+    if (GRAY_MODE != 4){
+        printf("ERROR: Expected GRAY_MODE 4\r\n");
+        return;
+    } 
+    
+    // Init EPD
+    EPD_3IN7_4Gray_Init();
+    EPD_3IN7_4Gray_Clear();
+    DEV_Delay_ms(500);
+
+    reusable_size = getImageSize();
+    if((reusable_buf = (UBYTE *)malloc(reusable_size)) == NULL) {
+        printf("ERROR: Failed to allocate reusable_buf (%u bytes)\r\n", reusable_size);
+        return;
+    }
+    
+    // Create an empty canvas so paint APIs are ready to use
+    Paint_NewImage(reusable_buf, EPD_3IN7_WIDTH, EPD_3IN7_HEIGHT, 270, WHITE);
+    
+    DEV_Delay_ms(200);
+
+    // Start with displaying boot screen
+    paintBootScreen();
+    EPD_3IN7_4Gray_Display(reusable_buf);
+    DEV_Delay_ms(1000);
+
+    // create queue & task
+    if (!dispQueue) {
+        dispQueue = xQueueCreate(8, sizeof(DisplayEvent));
+        if (!dispQueue) {
+            printf("ERROR: Failed to create dispQueue!\r\n");
+            return;
+        }
+    }
+    
+    Display_StartTask();
+}

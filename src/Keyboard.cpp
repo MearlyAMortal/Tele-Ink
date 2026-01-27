@@ -2,6 +2,7 @@
 #include <Wire.h>
 #include "Display.h"
 #include "Modem.h"
+#include "Command.h"
 //FreeRTOS
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -17,160 +18,204 @@ static SemaphoreHandle_t key_mutex = NULL;
 static volatile bool key_task_run = false;
 
 
-#define REG_KEY 0x00
+//#define LINE_BUFFER_SIZE 256
 #define POLL_MS 100
-#define DEBOUNCE_READS 3
+//#define DEBOUNCE_READS 3
 
 // FD
 //static void Keyboard_SequentialMode(void);
-static void handle_special_key(uint8_t &kc);
+static bool handle_special_key(uint8_t &kc);
 static bool i2c_read_key(uint8_t &out);
 static void keyTask(void *pv);
 static void Keyboard_Start(void);
 static void Keyboard_Stop(void);
 
 // Maps special keycodes to events
-static void handle_special_key(uint8_t &kc) {
+static bool handle_special_key(uint8_t &kc) {
     printf("Handling special keycode: 0x%02X, ", kc);
     switch (kc) {
         case 0x9F: { // Homescreen
             Display_Event_ShowHome();
-            break; 
+            return true; 
         }
         case 0x94: { // Idle
             Display_Event_ShowIdle();
-            break;
+            return true;
         }
         case 0xA8: { // Command
-            //Display_Event_ShowCommand();
-            printf("Not showing command.\r\n");
-            break;
+            Display_Event_ShowCommand();
+            return true;
+        }
+        case 0x9B: { // Sleep
+            Display_Event_Sleep();
+            return true;
         }
         default:
             printf("Keycode: 0x%02X unknown.\r\n", kc);
-            break;
+            return false;
     }
+    return false;
 }
 
 static bool i2c_read_key(uint8_t &out) {
-    if (!ikey_i2c) return false;
-    if (key_mutex) {
-        if (xSemaphoreTake(key_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
-            return false;
-        }
-    }
-    // Prepare kb
-    ikey_i2c->beginTransmission(ikey_addr);
-    // que one byte into tx buff from register ptr
-    ikey_i2c->write(REG_KEY);
-    // End write phase but dont stop and take tx wire error code
-    uint8_t tx = ikey_i2c->endTransmission(false);
-    uint8_t req = ikey_i2c->requestFrom((int)ikey_addr, 1);
-    bool ok = (tx == 0) && (req == 1);
-    if (ok) out = ikey_i2c->read();
+    if (!ikey_i2c || !key_mutex) return false;
+    if (xSemaphoreTake(key_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        // Prepare kb
+        ikey_i2c->beginTransmission(ikey_addr);
+        // que one byte into tx buff from register ptr
+        ikey_i2c->write(0x00);
+        // End write phase but dont stop, and take tx wire error code
+        uint8_t tx = ikey_i2c->endTransmission(false);
+        uint8_t req = ikey_i2c->requestFrom((int)ikey_addr, 1);
+        bool ok = (tx == 0) && (req == 1);
+        if (ok) out = ikey_i2c->read();
 
-    if (ok && out != 0x00){
-        printf("I2C RX: addr=0x%02X tx=%d req=%d val=0x%02X\r\n", ikey_addr, tx, req, out);
+        xSemaphoreGive(key_mutex);
+        if (ok && out != 0x00){
+            //printf("I2C RX: addr=0x%02X tx=%d req=%d val=0x%02X\r\n", ikey_addr, tx, req, out);
+            return true;
+        } 
     }
-    if (key_mutex) xSemaphoreGive(key_mutex);
-    return ok;
+    return false;
 }
 
 // No debounce, just read and handle special keys
 static void keyTask(void *pv) {
     (void)pv;
+    uint8_t keycode = 0;
     uint8_t last = 0;
-    uint8_t stable = 0;
-    uint8_t reads = 0;
-
     uint32_t timeout_count = 0;
     bool timeout = false;
-
+    // Buffer for sequential mode building strings to send to command processor
     bool sequential_mode = false;
-    uint8_t keycode = 0;
-    char key_char = '\n';
-
+    static char line_buffer[CMD_BUFFER_SIZE];
+    static size_t line_pos = 0;
 
     for (;;) {
-        if (false){ // debug
-            printf("keyTask alive loop\r\n");
-            DEV_Delay_ms(5000);
+        if (!key_task_run) {
+            DEV_Delay_ms(1000);
             continue;
-        }
-        if (!key_task_run) { 
-            DEV_Delay_ms(1000); 
-            continue; 
         }
 
         keycode = 0;
 
-        // Read Keyboard data
+        // Read Keyboard data, false if 0x00 (no key)
         if (!i2c_read_key(keycode) ) {
-            DEV_Delay_ms(POLL_MS);
+            // Idle timeout handling
+            DEV_Delay_ms(POLL_MS * 2);
             continue;
         }
-        // Idling detection
-        if (keycode == 0x00){
-            //printf("Idle\r\n");
-            if (screen_on && !timeout && (current_page != PAGE_IDLE) && ++timeout_count >= 120) {
-                printf("Sleep screen unless on idle_page\r\n");
-                DisplayEvent e = { .type = DISP_EVT_SLEEP, .payload = NULL};
-                Display_PostEvent(&e, 0);
-                timeout = true;
-            }
 
-            DEV_Delay_ms(500);
-            continue;
-        }
         // Key pressed
         timeout_count = 0;
         timeout = false;
-
-        // Check if FN special key (exit sequential and return to base handling)
+        // Handle special key if mapped (exit sequential and return to base handling)
         if (keycode != last && keycode >= 0x80 && keycode <= 0xAF) {
             last = keycode;
-            handle_special_key(keycode);
-            if (key_queue) xQueueReset(key_queue);
+            if (!handle_special_key(keycode)) continue; // Not mapped
+            line_pos = 0;
+            line_buffer[0] = '\0';
             sequential_mode = false;
-            continue; // skip adding to queue
+            continue;
         }
 
-       
-        // Read multiple keys into queue for sequences
-        // read keys until exit or enter then send to command processor wait for response
-        // then sends a fast event to display task to show the current buffer (no delay)
-        // then send another event to show command response
+        // Handle normal keys in sequential mode (Must take mutex to update cmd_buffer)
+        // Build local line buffer and update cmd_buffer input for command processing
         sequential_mode = (current_page == PAGE_COMMAND);
 
         if (sequential_mode) { 
             if (keycode == 0x1B) { // Esc
-                if (key_queue) xQueueReset(key_queue);
+                line_pos = 0;
+                line_buffer[0] = '\0';
                 sequential_mode = false;
+                last = keycode;
                 printf("Quit Command Mode\r\n");
+                Display_ClearCommandHistory();
+                Display_Event_ShowHome(); // Default to home
                 continue;
             } 
-            if (keycode == 0x0D) { // Enter
-                //printf("End of sequence: %s\r\n", command_send);
-                command_send = NULL; // Clear command send buffer
-                key_char = '\n';
-                if (key_queue && (xQueueSend(key_queue, &key_char, pdMS_TO_TICKS(100))) == pdTRUE) {
-                    printf("Command sequence ended with ENTER\r\n");
+            if (keycode == 0x08 || keycode == 0x7F) { // Backspace/Delete
+                if (line_pos > 0) {
+                    line_pos--;
+                    line_buffer[line_pos] = '\0';
+                    if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100))) {
+                        strcpy(cmd_buffer.input, line_buffer);
+                        cmd_buffer.state = CMD_STATE_TYPING;
+                        xSemaphoreGive(cmd_buffer.mutex);
+                    }
+                    printf("KB Buffer backspace: '%s'\r\n", line_buffer);
                 }
-                // Send to command processor
-                //command_resp = Command_ProcessCommandBuffer();
-                // Show command response on screen
-                // ScreenTask should print data when it sees new command_resp
+                last = keycode;
+                continue;
+            }
+            if (keycode == 0x0D) { // Enter
+                line_buffer[line_pos] = '\0';
+                if (line_pos != 0){
+                    // Update history BEFORE processing command
+                    if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100))) {
+                        // Add input to history
+                        if (cmd_buffer.history_count >= CMD_HISTORY_LINES) {
+                            // Shift history up
+                            for (int i = 0; i < CMD_HISTORY_LINES - 1; i++) {
+                                strcpy(cmd_buffer.history[i], cmd_buffer.history[i + 1]);
+                            }
+                            cmd_buffer.history_count = CMD_HISTORY_LINES - 1;
+                        }
+                        strcpy(cmd_buffer.history[cmd_buffer.history_count], line_buffer);
+                        cmd_buffer.history_count++;
+                        
+                        strcpy(cmd_buffer.input, line_buffer);
+                        xSemaphoreGive(cmd_buffer.mutex);
+                    }
+
+                    Command_Handle();
+
+                    // Add output to history after command completes
+                    if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100))) {
+                        if (cmd_buffer.output[0] != '\0') {
+                            if (cmd_buffer.history_count >= CMD_HISTORY_LINES) {
+                                for (int i = 0; i < CMD_HISTORY_LINES - 1; i++) {
+                                    strcpy(cmd_buffer.history[i], cmd_buffer.history[i + 1]);
+                                }
+                                cmd_buffer.history_count = CMD_HISTORY_LINES - 1;
+                            }
+                            strcpy(cmd_buffer.history[cmd_buffer.history_count], cmd_buffer.output);
+                            cmd_buffer.history_count++;
+                        }
+                        xSemaphoreGive(cmd_buffer.mutex);
+                    }
+                }
+                
+                // Reset line buffer
+                line_pos = 0;
+                line_buffer[0] = '\0';
+                if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100))) {
+                    strcpy(cmd_buffer.input, line_buffer);
+                    cmd_buffer.state = CMD_STATE_TYPING;
+                    xSemaphoreGive(cmd_buffer.mutex);
+                }
+                last = keycode;
                 continue;
             }
 
             // Adds key char to queue
-            key_char = (char)keycode;
-            printf("Key about to be queued: %c\r\n", key_char);
-            if (key_queue && (xQueueSend(key_queue, &key_char, pdMS_TO_TICKS(100))) == pdTRUE) {
-                printf("Keycode 0x%02X queued\r\n", keycode);
-            } else {
-                printf("Keycode 0x%02X NOT queued\r\n", keycode);
-            } 
+            if (keycode >= 0x20 && keycode <= 0x7E) { // Printable ASCII
+                if (line_pos < CMD_BUFFER_SIZE - 1) {
+                    line_buffer[line_pos++] = (char)keycode;
+                    line_buffer[line_pos] = '\0';
+                    
+                    if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100))) {
+                        strcpy(cmd_buffer.input, line_buffer);
+                        cmd_buffer.state = CMD_STATE_TYPING;
+                        xSemaphoreGive(cmd_buffer.mutex);
+                    }
+
+                    // Send partial buffer to display?
+                    printf("KB Buffer: '%s'\r\n", line_buffer);
+                } else {
+                    printf("Command buffer full!\r\n");
+                }
+            }
         }
 
         last = keycode;
@@ -186,14 +231,11 @@ static void Keyboard_Start(void){
 }
 
 bool Keyboard_Init(TwoWire *i2cInstance, uint8_t i2cAddress){
-    printf("About to init keyboard\r\n");
     if (!i2cInstance) return false;
     ikey_i2c = i2cInstance;
-    ikey_addr = i2cAddress ? i2cAddress : 0x5F; // M5Stack keyboard default
-
+    ikey_addr = i2cAddress;
     if (!key_mutex) key_mutex = xSemaphoreCreateMutex();
     if (!key_queue) key_queue = xQueueCreate(256, sizeof(char));
-
     Keyboard_Start();
     return true;
 }
@@ -204,8 +246,8 @@ static void Keyboard_Stop(void) {
         vTaskDelete(key_task);
         key_task = NULL;
     }
-    if (key_queue) { vQueueDelete(key_queue); key_queue = NULL; }
-    if (key_mutex) { vSemaphoreDelete(key_mutex); key_mutex = NULL; }
+    if (key_queue) vQueueDelete(key_queue); key_queue = NULL;
+    if (key_mutex) vSemaphoreDelete(key_mutex); key_mutex = NULL;
 }
 
 bool Keyboard_GetChar(char *out, TickType_t wait) {

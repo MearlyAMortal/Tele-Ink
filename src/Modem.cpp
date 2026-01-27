@@ -31,12 +31,12 @@ static bool modem_idle = false;
 
 // FD
 static void Modem_StartTask(void);
-static bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeoutMs);
-static bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeoutMs);
+static bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeout_ms);
+static bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeout_ms);
 static bool Modem_AT(void);
 static void Modem_HandleURC(const char *line);
-static bool Modem_GetGNSSRaw(char *resp, size_t resp_len, uint32_t timeoutMs);
-static bool Modem_GetGNSSutc(char *out, size_t outLen, uint32_t timeoutMs);
+static bool Modem_GetGNSSRaw(char *resp, size_t resp_len, uint32_t timeout_ms);
+static bool Modem_GetGNSSutc(char *resp, size_t resp_en, uint32_t timeout_ms);
 static bool Modem_CheckNetwork(void);
 static void modemTask(void *pv);
 
@@ -56,11 +56,11 @@ void Modem_PowerOff(void) {
 }
 
 
-static bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeoutMs) {
+static bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeout_ms) {
     if (!modemSerial || !modem_ready) return false;
     // Try to take the mutex so we don't collide with modemTask sending an AT cmd.
     if (modem_mutex) {
-        if (xSemaphoreTake(modem_mutex, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) return false;
+        if (xSemaphoreTake(modem_mutex, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) return false;
     }
     size_t written = modemSerial->write(data, len);
     modemSerial->flush();
@@ -69,14 +69,14 @@ static bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeoutMs) 
 }
 
 // Sends AT command to modem and waits for response. (safe)
-static bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeoutMs) {
+static bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeout_ms) {
     if (!modemSerial || !cmd || !resp || resp_len == 0) return false;
     ModemCmd *r = (ModemCmd*)malloc(sizeof(ModemCmd)); // Heap
     if (!r) return false;
     strncpy(r->cmd, cmd, sizeof(r->cmd)-1); 
     r->cmd[sizeof(r->cmd)-1]=0;
     r->done_sem = xSemaphoreCreateBinary();
-    r->timeout_ms = timeoutMs;
+    r->timeout_ms = timeout_ms;
     r->resp[0] = '\0';
     r->waitForOK = true;
     r->start_tick = 0;
@@ -90,7 +90,7 @@ static bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t 
 
     // wait for response (task will give the semaphore)
     bool ok = false;
-    if (xSemaphoreTake(r->done_sem, pdMS_TO_TICKS(timeoutMs + 500)) == pdTRUE) {
+    if (xSemaphoreTake(r->done_sem, pdMS_TO_TICKS(timeout_ms + 500)) == pdTRUE) {
         // copy to caller buffer
         strncpy(resp, r->resp, resp_len-1);
         resp[resp_len-1] = '\0';
@@ -111,7 +111,7 @@ static bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t 
 static bool Modem_AT(void){
     if (!modem_serial_begun) return false;
     char resp[64];
-    if (!Modem_SendAT("AT", resp, sizeof(resp), 3000)) {
+    if (!Modem_SendAT("AT", resp, sizeof(resp), 1000)) {
         printf("AT response: NO\r\n");
         return false;
     }
@@ -167,24 +167,24 @@ static void Modem_HandleURC(const char *line) {
 
 
 // Request GNSS on, get raw +CGNSINF (SIMCOM-style) into resp
-static bool Modem_GetGNSSRaw(char *resp, size_t resp_len, uint32_t timeoutMs) {
+static bool Modem_GetGNSSRaw(char *resp, size_t resp_len, uint32_t timeout_ms) {
     if (!modem_ready) return false;
     char tmp[128];
     // enable GNSS
     Modem_SendAT("AT+CGNSPWR=1", tmp, sizeof(tmp), 1500);
     vTaskDelay(pdMS_TO_TICKS(800));
     // read GNSS info
-    if (!Modem_SendAT("AT+CGNSINF", resp, resp_len, timeoutMs)) return false;
+    if (!Modem_SendAT("AT+CGNSINF", resp, resp_len, timeout_ms)) return false;
     return true;
 }
 
 // Parse UTC timestamp from a +CGNSINF line into out (YYYMMDDHHMMSS.sss)
-static bool Modem_GetGNSSutc(char *out, size_t outLen, uint32_t timeoutMs) {
+static bool Modem_GetGNSSutc(char *resp, size_t resp_len, uint32_t timeout_ms) {
     const size_t TMP_SZ = 1024;
     char *tmp = (char*)malloc(TMP_SZ);
     if (!tmp) return false;
     bool ok = false;
-    if (!Modem_GetGNSSRaw(tmp, TMP_SZ, timeoutMs)) {
+    if (!Modem_GetGNSSRaw(tmp, TMP_SZ, timeout_ms)) {
         free(tmp);
         return false;
     }
@@ -200,8 +200,8 @@ static bool Modem_GetGNSSutc(char *out, size_t outLen, uint32_t timeoutMs) {
             while (tok) {
                 fld++;
                 if (fld == 3) {
-                    strncpy(out, tok, outLen-1);
-                    out[outLen-1] = '\0';
+                    strncpy(resp, tok, resp_len-1);
+                    resp[resp_len-1] = '\0';
                     ok = true;
                     break;
                 }
@@ -233,9 +233,7 @@ static bool Modem_CheckNetwork(void) {
 
 
 
-
-
-/* FreeRTOS task that reads URCs / unsolicited modem lines */
+// Modem background task to handle command queue and URCs
 static void modemTask(void *pv) {
     (void)pv;
     char line[256];
