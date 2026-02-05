@@ -38,6 +38,7 @@ extern bool screen_on;
 // Display events
 typedef enum {
     DISP_EVT_NONE,
+    DISP_EVT_WAKE,
     DISP_EVT_SLEEP, // Screen major updates
     DISP_EVT_SHOW_HOME, 
     DISP_EVT_SHOW_COMMAND,
@@ -49,8 +50,6 @@ typedef enum {
     DISP_EVT_MODEM_NET,
     DISP_EVT_SMS_RECEIVED,
     DISP_EVT_RING,
-    //DISP_EVT_UPDATE_COMMAND, // KB
-    //DISP_EVT_DONE_COMMAND,
     DISP_EVT_CUSTOM_MSG,
 } DisplayEventType;
 
@@ -83,6 +82,7 @@ extern CommandBuffer cmd_buffer;
 
 // Post event to display task
 bool Display_PostEvent(const DisplayEvent *evt, TickType_t ticksToWait);
+void Display_Event_Wake(void);
 void Display_Event_Sleep(void);
 void Display_Event_ShowHome(void);
 void Display_Event_ShowIdle(void);

@@ -133,7 +133,7 @@ static void EPD_3IN7_SendData(UBYTE Data)
 
 static void EPD_3IN7_ReadBusy_HIGH(void)
 {
-    Debug("e-Paper busy\r\n");
+    Debug("EPD busy\r\n");
     UBYTE busy;
     int loops = 0;
     const int maxLoops = 1000; // 1000 * 10ms = 6s timeout
@@ -141,12 +141,12 @@ static void EPD_3IN7_ReadBusy_HIGH(void)
         busy = DEV_Digital_Read(EPD_BUSY_PIN);
         if (busy) { DEV_Delay_ms(10); }
         if (++loops >= maxLoops) {
-            Debug("e-Paper busy TIMEOUT after 10 seconds\r\n");
+            Debug("EPD busy TIMEOUT after 10 seconds\r\n");
             loops = 0;
         }
     } while(busy);
     DEV_Delay_ms(200);
-    Debug("e-Paper busy release\r\n");
+    Debug("EPD release\r\n");
 }
 
 /******************************************************************************

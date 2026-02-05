@@ -12,7 +12,7 @@
 
 #define MODEM_RX_PIN 16
 #define MODEM_TX_PIN 17
-#define MODEM_POWER_PIN -1
+#define MODEM_POWER_PIN 4
 #define KEYBOARD_I2C 0x5F
 #define KEYBOARD_SDA_PIN 21 //14 <used by screen>
 #define KEYBOARD_SCL_PIN 22 //13 <used by screen>

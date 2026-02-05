@@ -32,7 +32,6 @@ static bool modem_idle = false;
 // FD
 static void Modem_StartTask(void);
 static bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeout_ms);
-static bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeout_ms);
 static bool Modem_AT(void);
 static void Modem_HandleURC(const char *line);
 static bool Modem_GetGNSSRaw(char *resp, size_t resp_len, uint32_t timeout_ms);
@@ -41,18 +40,15 @@ static bool Modem_CheckNetwork(void);
 static void modemTask(void *pv);
 
 
-static void Modem_StartTask(void) {
-    // Core 1, Priority 2
-    xTaskCreatePinnedToCore(modemTask, "modem", 8192, NULL, 2, &modem_task_handle, 1);
-}
-
-
-void Modem_PowerOff(void) {
-    if (modemPowerPin >= 0) {
-        digitalWrite(modemPowerPin, LOW);
-        delay(100);
+void Modem_TogglePWK(uint32_t duration_ms) {
+    if (modemPowerPin == -1) {
+        printf("Modem: No power pin provided.\r\n");
+        return;
     }
-    modem_ready = false;
+    printf("Modem: Toggle power for %lu ms.\r\n", duration_ms);
+    digitalWrite(modemPowerPin, HIGH);
+    DEV_Delay_ms(duration_ms);
+    digitalWrite(modemPowerPin, LOW);
 }
 
 
@@ -69,10 +65,11 @@ static bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeout_ms)
 }
 
 // Sends AT command to modem and waits for response. (safe)
-static bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeout_ms) {
+bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeout_ms) {
     if (!modemSerial || !cmd || !resp || resp_len == 0) return false;
     ModemCmd *r = (ModemCmd*)malloc(sizeof(ModemCmd)); // Heap
     if (!r) return false;
+    printf("Modem_SendAT malloc OK\r\n");
     strncpy(r->cmd, cmd, sizeof(r->cmd)-1); 
     r->cmd[sizeof(r->cmd)-1]=0;
     r->done_sem = xSemaphoreCreateBinary();
@@ -85,6 +82,7 @@ static bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t 
     if (modem_cmd_queue == NULL || xQueueSend(modem_cmd_queue, &r, pdMS_TO_TICKS(2000)) != pdTRUE) {
         vSemaphoreDelete(r->done_sem);
         free(r);
+        printf("Modem_SendAT free OK\r\n");
         return false;
     }
 
@@ -96,15 +94,14 @@ static bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t 
         resp[resp_len-1] = '\0';
         ok = true;
         // if the modemTask reported a timeout marker, treat as failure
-        if (strcmp(resp, "TIMEOUT") != 0) {
+        if (strstr(resp, "OK") != NULL) {
             ok = true;
-        } else {
-            ok = false;
-        }    
+        }   
     }
 
     vSemaphoreDelete(r->done_sem);
     free(r);
+    printf("Modem_SendAT free OK\r\n");
     return ok;
 }
 
@@ -123,43 +120,11 @@ static bool Modem_AT(void){
     return false;
 }
 
-void Modem_PowerOn(void) {
-    if (modemPowerPin >= 0) {
-        digitalWrite(modemPowerPin, HIGH);
-        DEV_Delay_ms(1000);
-    } 
-    
-    if (modemSerial && !modem_serial_begun && modem_rx_pin >= 0 && modem_tx_pin >= 0){
-        // Start serial
-        modem_serial_begun = true;
-        const int bauds[] = {115200, 57600, 9600};
-        // Check common bauds
-        for (size_t i = 0; i < sizeof(bauds)/sizeof(bauds[0]); ++i) {
-            if (modem_ready) break;
-            int b = bauds[i];
-            modemSerial->begin(b, SERIAL_8N1, modem_rx_pin, modem_tx_pin);
-            modemSerial->flush();
 
-            if (Modem_AT()) modem_ready = true;
-        } 
-        
-        if (modem_ready) {
-            printf("AT reply received\n");
-            DisplayEvent e = { .type = DISP_EVT_MODEM_READY, .payload = NULL};
-            Display_PostEvent(&e, 0);
-        } else {
-            printf("No AT reply at tested bauds — check TX/RX, GND, power and PWRKEY\n");
-            modem_serial_begun = false;
-        }
-                        
-        // DANGER: debugging only - this can interfere with displayTask
-        //pinMode(EPD_BUSY_PIN, INPUT_PULLUP);
-    } 
-    
-}
 
 static void Modem_HandleURC(const char *line) {
-    if (strstr(line, "+CREG: OK")) {
+    if (strstr(line, "+CREG:")) {
+
         DisplayEvent e = { .type = DISP_EVT_MODEM_NET, .payload = NULL };
         Display_PostEvent(&e, 0);
     }
@@ -183,9 +148,11 @@ static bool Modem_GetGNSSutc(char *resp, size_t resp_len, uint32_t timeout_ms) {
     const size_t TMP_SZ = 1024;
     char *tmp = (char*)malloc(TMP_SZ);
     if (!tmp) return false;
+    printf("Modem_GetGNSSutc malloc OK\r\n");
     bool ok = false;
     if (!Modem_GetGNSSRaw(tmp, TMP_SZ, timeout_ms)) {
         free(tmp);
+        printf("Modem_GetGNSSutc free OK\r\n");
         return false;
     }
 
@@ -210,6 +177,7 @@ static bool Modem_GetGNSSutc(char *resp, size_t resp_len, uint32_t timeout_ms) {
         }
     }
     free(tmp);
+    printf("Modem_GetGNSSutc free OK\r\n");
     return ok;
 }
 
@@ -239,7 +207,55 @@ static void modemTask(void *pv) {
     char line[256];
     size_t idx = 0;
     ModemCmd *queued = NULL;
+
+    // Init modem
     
+    printf("Waiting 20s for modem coldstart\r\n");
+    DEV_Delay_ms(20000);
+    /*
+    printf("Restarting modem...\r\n");
+    Modem_TogglePWK(2200);
+    DEV_Delay_ms(25000);
+    Modem_TogglePWK(1100);
+    DEV_Delay_ms(36000);
+    printf("Modem ready to begin serial.\r\n");
+    */
+
+    modemSerial->begin(115200, SERIAL_8N1, modem_rx_pin, modem_tx_pin);
+    modemSerial->flush();
+    DEV_Delay_ms(100);
+    modem_serial_begun = true;
+
+    for (int i = 0; i < 3; ++i) {
+        modemSerial->print("AT\r\n");
+        DEV_Delay_ms(500);
+
+        while (modemSerial->available()) {
+            char resp[32];
+            size_t len = modemSerial->readBytesUntil('\n', resp, sizeof(resp)-1);
+            resp[len] = '\0';
+            while (len > 0 && isspace(resp[len - 1])) {
+                resp[--len] = '\0';
+            }
+            //printf("Modem init RX: %s\r\n", resp);
+            if (strcmp(resp, "OK") == 0) {
+                modem_ready = true;
+                break;
+            }
+        }
+        if (modem_ready) break;
+        printf("Modem not responding to AT, retrying...\r\n");
+        DEV_Delay_ms(1000);
+    }
+
+    if (modem_ready) {
+        printf("Modem is ready!\r\n");
+        DisplayEvent e = { .type = DISP_EVT_MODEM_READY, .payload = NULL};
+        Display_PostEvent(&e, 0);
+    } else {
+        printf("Modem failed to respond to AT commands.\r\n");
+    }
+
     for (;;) {
         // if modem not ready, wait and loop
         if (!modemSerial || !modem_ready) {
@@ -249,7 +265,6 @@ static void modemTask(void *pv) {
 
         // 1) Accept new command if none currently pending
         if (current_cmd == NULL && modem_cmd_queue) {
-            printf("Ready for command!\r\n");
             if (xQueueReceive(modem_cmd_queue, &queued, 0) == pdTRUE) {
                 printf("Command recived!\r\n");
                 // start the command
@@ -259,15 +274,24 @@ static void modemTask(void *pv) {
                 // clear resp buffer
                 current_cmd->resp[0] = '\0';
                 // send the command
-                modemSerial->print(current_cmd->cmd);
-                modemSerial->print("\r\n");
+                if (modem_mutex && xSemaphoreTake(modem_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                    modemSerial->print(current_cmd->cmd);
+                    modemSerial->print("\r\n");
+                    modemSerial->flush();
+                    xSemaphoreGive(modem_mutex);
+                } else {
+                    // Failed to get mutex - abort command
+                    strcpy(current_cmd->resp, "ERROR: modem_mutex timeout");
+                    xSemaphoreGive(current_cmd->done_sem);
+                    current_cmd = NULL;
+                }
             }
         }
 
         // 2) Read available bytes and accumulate lines
         while (modemSerial->available()) {
-            printf("Reading modem...\r\n");
             int c = modemSerial->read();
+            printf("modemSerial->available()=%d read=%d\r\n", modemSerial->available(), c);
             if (c < 0) break;
             if (idx < sizeof(line) - 1) line[idx++] = (char)c;
             // line termination on LF
@@ -332,6 +356,11 @@ static void modemTask(void *pv) {
     }
 }
 
+static void Modem_StartTask(void) {
+    // Core 1, Priority 2
+    xTaskCreatePinnedToCore(modemTask, "modem", 8192, NULL, 2, &modem_task_handle, 1);
+}
+
 // Create Sem/Queue and start modemTask
 bool Modem_Init(HardwareSerial *serial, int rxPin, int txPin, int powerPin) {
     modemSerial = serial;
@@ -339,14 +368,18 @@ bool Modem_Init(HardwareSerial *serial, int rxPin, int txPin, int powerPin) {
     modem_rx_pin = rxPin;
     modem_tx_pin = txPin;
 
-    // Mutex
+    if (modemPowerPin != -1) {
+        pinMode(modemPowerPin, OUTPUT);
+        digitalWrite(modemPowerPin, LOW);
+    }
+
+    // Safety
     if (!modem_mutex) modem_mutex = xSemaphoreCreateMutex();
     if (!modem_resp_sem) modem_resp_sem = xSemaphoreCreateBinary();
     // Queue
     if (!modem_cmd_queue) modem_cmd_queue = xQueueCreate(4, sizeof(ModemCmd*));
 
     if (modemSerial) {
-        Modem_PowerOn();
         Modem_StartTask();
 
         // DEBUG

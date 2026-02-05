@@ -1,5 +1,7 @@
 #include "Command.h"
+// For public queue/buffer
 #include "Display.h"
+#include "Modem.h"
 // FD
 #include <string.h>
 
@@ -27,19 +29,21 @@ static void Command_HelpPage(char *r) {
 // Interprets keyboard input and responds with an error or display/modem/etc event. (Protected)
 void Command_Handle(void){
     if (!cmd_buffer.input) return;
-    if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-    cmd_buffer.state = CMD_STATE_PROCESSING;
     char in[CMD_BUFFER_SIZE] = {0};
-    strcpy(in, cmd_buffer.input);
-
-    printf("Command_Handle: %s\r\n", in);
+    // Copy input command while holding mutex briefly
+    if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        cmd_buffer.state = CMD_STATE_PROCESSING;
+        strcpy(in, cmd_buffer.input);
+        xSemaphoreGive(cmd_buffer.mutex);
+    }
 
     // Not command, echo message
     if (in[0] != '/'){
-        strcpy(cmd_buffer.output, in);
-        cmd_buffer.state = CMD_STATE_DONE;
-        printf("Command handled: %s -> %s\r\n", in, cmd_buffer.output);
-        xSemaphoreGive(cmd_buffer.mutex);
+        if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            strcpy(cmd_buffer.output, in);
+            cmd_buffer.state = CMD_STATE_DONE;
+            xSemaphoreGive(cmd_buffer.mutex);
+        }
         return;
     }
     // Default command error for now
@@ -49,19 +53,51 @@ void Command_Handle(void){
     // Help menu
     if (strcmp(in, "/help") == 0) {
         Command_HelpPage(out);
-    }
+    } 
     // Clear history
     else if (strcmp(in, "/clear") == 0) {
         Display_ClearCommandHistory();
         strcpy(out, "History cleared");
-    } 
-
-    // Output into buffer, state done then give mutex and post event for finished command
-    strcpy(cmd_buffer.output, out);
-    cmd_buffer.state = CMD_STATE_DONE;
-
-    printf("Command handled: %s -> %s\r\n", in, cmd_buffer.output);
-    xSemaphoreGive(cmd_buffer.mutex);
-   //Display_Event_DoneCommand();
+    }
+    // ESP control
+    else if (strncmp(in, "/esp", 4) == 0) {
+        if (strcmp(in, "/esp pwk") == 0) {
+            ESP.restart();
+        }
+    }
+    // Modem control
+    else if (strncmp(in, "/sim", 4) == 0) {
+        if (strncmp(in, "/sim pwk1", 9) == 0) {  
+            Modem_TogglePWK(1200);
+            strcpy(out, "Toggled pwk on modem for 1.2s");
+        } else if (strncmp(in, "/sim pwk2", 9) == 0) {  
+            Modem_TogglePWK(2500);
+            strcpy(out, "Toggled pwk on modem for 2s");
+        } else {
+            strcpy(out, "Error: Modem command unrecognized");
+        }
+    }
+    // Raw AT command - /AT <command> --> Modem_SendAT(<command>)
+    // Modem task should dequeue and send command, then return response
+    else if (strncmp(in, "/at", 3) == 0) {
+        if (strlen(in) > 4 && in[3] == ' ') {
+            char *at_cmd = in + 4;
+            char at_resp[CMD_BUFFER_SIZE] = {0};
+            if (!Modem_SendAT(at_cmd, at_resp, CMD_BUFFER_SIZE, 5000)){
+                strcpy(out, "Error: AT command failed or timed out");
+            } else {
+                strcpy(out, at_resp);
+            }
+        }
+    }
+    
+    // Set cmd.buffer output and state
+    if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        strcpy(cmd_buffer.output, out);
+        cmd_buffer.state = CMD_STATE_DONE;
+        xSemaphoreGive(cmd_buffer.mutex);
+    }
+  
+    //printf("Command handled: %s -> %s\r\n", in, cmd_buffer.output);
     return;
 }   

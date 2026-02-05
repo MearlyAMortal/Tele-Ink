@@ -33,12 +33,11 @@ typedef struct ModemCmd {
 
 // Public
 bool Modem_Init(HardwareSerial *serial, int rxPin, int txPin, int powerPin);
-
+bool Modem_SendAT(const char *cmd, char *resp, size_t respLen, uint32_t timeoutMs);
+void Modem_TogglePWK(uint32_t duration_ms);
 
 // Private
 
-void Modem_PowerOn(void);
-void Modem_PowerOff(void);
 /*
 bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeoutMs = 1000);
 bool Modem_SendAT(const char *cmd, char *resp, size_t respLen, uint32_t timeoutMs);

@@ -17,22 +17,19 @@ static QueueHandle_t key_queue = NULL;
 static SemaphoreHandle_t key_mutex = NULL;
 static volatile bool key_task_run = false;
 
-
-//#define LINE_BUFFER_SIZE 256
 #define POLL_MS 100
-//#define DEBOUNCE_READS 3
 
 // FD
-//static void Keyboard_SequentialMode(void);
 static bool handle_special_key(uint8_t &kc);
 static bool i2c_read_key(uint8_t &out);
 static void keyTask(void *pv);
 static void Keyboard_Start(void);
 static void Keyboard_Stop(void);
+static bool Keyboard_IsConnected(void);
+
 
 // Maps special keycodes to events
 static bool handle_special_key(uint8_t &kc) {
-    printf("Handling special keycode: 0x%02X, ", kc);
     switch (kc) {
         case 0x9F: { // Homescreen
             Display_Event_ShowHome();
@@ -46,8 +43,12 @@ static bool handle_special_key(uint8_t &kc) {
             Display_Event_ShowCommand();
             return true;
         }
-        case 0x9B: { // Sleep
-            Display_Event_Sleep();
+        case 0x80: { // Wake/Sleep toggle
+            if (screen_on) {
+                Display_Event_Sleep();
+            } else {
+                Display_Event_Wake();
+            }
             return true;
         }
         default:
@@ -72,7 +73,6 @@ static bool i2c_read_key(uint8_t &out) {
 
         xSemaphoreGive(key_mutex);
         if (ok && out != 0x00){
-            //printf("I2C RX: addr=0x%02X tx=%d req=%d val=0x%02X\r\n", ikey_addr, tx, req, out);
             return true;
         } 
     }
@@ -93,7 +93,7 @@ static void keyTask(void *pv) {
 
     for (;;) {
         if (!key_task_run) {
-            DEV_Delay_ms(1000);
+            DEV_Delay_ms(POLL_MS*1000);
             continue;
         }
 
@@ -102,7 +102,7 @@ static void keyTask(void *pv) {
         // Read Keyboard data, false if 0x00 (no key)
         if (!i2c_read_key(keycode) ) {
             // Idle timeout handling
-            DEV_Delay_ms(POLL_MS * 2);
+            DEV_Delay_ms(POLL_MS);
             continue;
         }
 
@@ -110,7 +110,7 @@ static void keyTask(void *pv) {
         timeout_count = 0;
         timeout = false;
         // Handle special key if mapped (exit sequential and return to base handling)
-        if (keycode != last && keycode >= 0x80 && keycode <= 0xAF) {
+        if (keycode >= 0x80 && keycode <= 0xAF) {
             last = keycode;
             if (!handle_special_key(keycode)) continue; // Not mapped
             line_pos = 0;
@@ -129,7 +129,6 @@ static void keyTask(void *pv) {
                 line_buffer[0] = '\0';
                 sequential_mode = false;
                 last = keycode;
-                printf("Quit Command Mode\r\n");
                 Display_ClearCommandHistory();
                 Display_Event_ShowHome(); // Default to home
                 continue;
@@ -143,7 +142,6 @@ static void keyTask(void *pv) {
                         cmd_buffer.state = CMD_STATE_TYPING;
                         xSemaphoreGive(cmd_buffer.mutex);
                     }
-                    printf("KB Buffer backspace: '%s'\r\n", line_buffer);
                 }
                 last = keycode;
                 continue;
@@ -153,7 +151,7 @@ static void keyTask(void *pv) {
                 if (line_pos != 0){
                     // Update history BEFORE processing command
                     if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100))) {
-                        // Add input to history
+                        // Is history full?
                         if (cmd_buffer.history_count >= CMD_HISTORY_LINES) {
                             // Shift history up
                             for (int i = 0; i < CMD_HISTORY_LINES - 1; i++) {
@@ -168,7 +166,7 @@ static void keyTask(void *pv) {
                         xSemaphoreGive(cmd_buffer.mutex);
                     }
 
-                    Command_Handle();
+                    Command_Handle(); // Takes mutex internally
 
                     // Add output to history after command completes
                     if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100))) {
@@ -210,8 +208,6 @@ static void keyTask(void *pv) {
                         xSemaphoreGive(cmd_buffer.mutex);
                     }
 
-                    // Send partial buffer to display?
-                    printf("KB Buffer: '%s'\r\n", line_buffer);
                 } else {
                     printf("Command buffer full!\r\n");
                 }
@@ -223,11 +219,28 @@ static void keyTask(void *pv) {
     }
 }
 
+static bool Keyboard_IsConnected(void) {
+    if (!ikey_i2c || !key_mutex) return false;
+    bool connected = false;
+    if (xSemaphoreTake(key_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        ikey_i2c->beginTransmission(ikey_addr);
+        if (ikey_i2c->endTransmission() == 0) {
+            connected = true;
+        }
+        xSemaphoreGive(key_mutex);
+    }
+    return connected;
+}
+
 static void Keyboard_Start(void){
     if (key_task) return;
-    key_task_run = true;
-    // Core 0, Priority 1
-    xTaskCreatePinnedToCore(keyTask, "key", 4096, NULL, 1, &key_task, 0);
+    if (Keyboard_IsConnected()) {
+        key_task_run = true;
+        // Core 0, Priority 1
+        xTaskCreatePinnedToCore(keyTask, "key", 4096, NULL, 1, &key_task, 0);
+    } else {
+        printf("Keyboard not connected!\r\n");
+    }
 }
 
 bool Keyboard_Init(TwoWire *i2cInstance, uint8_t i2cAddress){
