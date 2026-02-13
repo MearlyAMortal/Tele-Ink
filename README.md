@@ -21,24 +21,24 @@
 
 ## Commands
 ```
-* $ TEXT               - Echo mode
-* $ /help              - Sends you here
-* $ /clear             - Clear history
-* $ /sim on/off        - Toggle pwk on modem
-* $ /sim net           - Send AT+CREG? and handle URC auto
-* $ /esp rst           - Restart ESP32
-* $ /at CMD            - Send raw single line AT command
-* $ /at                - Enter AT mode
-  * AT_                - Type AT command ex: H, +CNUM (AT is prepented)
-  * AT/exit            - Exit AT mode
-* $ /sms s NUMBER      - Start SMS send mode to NUMBER
-  * '>' MESSAGE        - Send SMS MESSAGE to NUMBER
-  * '>' /exit          - Exit SMS send mode
-* $ /sms ra            - Read all messages stored on sim
-* $ /sms ru            - Read unread messages stored on sim
-  * : ID               - If there are X messages to read choose idx starting at 0
-  * : /d ID            - Delete message from sim
-  * : /exit            - Exit SMS read mode
+$ TEXT               - Echo mode
+$ /help              - Sends you here
+$ /clear             - Clear history
+$ /sim on/off        - Toggle pwk on modem
+$ /sim net           - Send AT+CREG? and handle URC auto
+$ /esp rst           - Restart ESP32
+$ /at CMD            - Send raw single line AT command
+$ /at                - Enter AT mode
+  AT_                - Type AT command ex: H, +CNUM (AT is prepented)
+  AT/exit            - Exit AT mode
+$ /sms s NUMBER      - Start SMS send mode to NUMBER
+  > MESSAGE          - Send SMS MESSAGE to NUMBER
+  > /exit            - Exit SMS send mode
+$ /sms ra            - Read all messages stored on sim 
+$ /sms ru            - Read unread messages stored on sim
+  : ID               - If there are X messages to read choose idx starting at 0
+  : /d ID            - Delete message from sim
+  : /exit            - Exit SMS read mode
 ```
 # High level Code functionality
 1. Starting at Tele-Ink.ino
