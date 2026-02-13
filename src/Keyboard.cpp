@@ -17,6 +17,8 @@ static QueueHandle_t key_queue = NULL;
 static SemaphoreHandle_t key_mutex = NULL;
 static volatile bool key_task_run = false;
 
+static int history_peek_idx = -1;
+
 #define POLL_MS 100
 
 // FD
@@ -31,24 +33,28 @@ static bool Keyboard_IsConnected(void);
 // Maps special keycodes to events
 static bool handle_special_key(uint8_t &kc) {
     switch (kc) {
-        case 0x9F: { // Homescreen
+        case 0x9F: { // H Homescreen
             Display_Event_ShowHome();
             return true; 
         }
-        case 0x94: { // Idle
+        case 0x94: { // I Idle
             Display_Event_ShowIdle();
             return true;
         }
-        case 0xA8: { // Command
+        case 0xA8: { // C Command
             Display_Event_ShowCommand();
             return true;
         }
-        case 0x80: { // Wake/Sleep toggle
+        case 0x80: { // ESC Wake/Sleep toggle
             if (screen_on) {
                 Display_Event_Sleep();
             } else {
                 Display_Event_Wake();
             }
+            return true;
+        }
+        case 0x96: { // P Activate repaint
+            Display_Event_Wake();
             return true;
         }
         default:
@@ -128,6 +134,10 @@ static void keyTask(void *pv) {
                 line_pos = 0;
                 line_buffer[0] = '\0';
                 sequential_mode = false;
+                sms_send = false;
+                sms_read = false;
+                sms_count = 0;
+                at_mode = false;
                 last = keycode;
                 Display_ClearCommandHistory();
                 Display_Event_ShowHome(); // Default to home
@@ -147,6 +157,7 @@ static void keyTask(void *pv) {
                 continue;
             }
             if (keycode == 0x0D) { // Enter
+                history_peek_idx = -1;
                 line_buffer[line_pos] = '\0';
                 if (line_pos != 0){
                     // Update history BEFORE processing command
@@ -163,10 +174,13 @@ static void keyTask(void *pv) {
                         cmd_buffer.history_count++;
                         
                         strcpy(cmd_buffer.input, line_buffer);
+                        // Copy for history (linked list?)
+                        
+
                         xSemaphoreGive(cmd_buffer.mutex);
                     }
 
-                    Command_Handle(); // Takes mutex internally
+                    Command_Handle(); // Takes cmd_buffer mutex internally
 
                     // Add output to history after command completes
                     if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100))) {
@@ -196,8 +210,48 @@ static void keyTask(void *pv) {
                 continue;
             }
 
+            
+
+            // Arrow keys(only up and down for now)
+            if (0xB5 == keycode || keycode == 0xB6){
+                if (keycode == 0xB5) { //up
+                    if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100))) {
+                        if (history_peek_idx < cmd_buffer.history_count - 1) {
+                            history_peek_idx++;
+                            int idx = cmd_buffer.history_count - 1 - history_peek_idx;
+                            strcpy(line_buffer, cmd_buffer.history[idx]);
+                            line_pos = strlen(line_buffer);
+                            strcpy(cmd_buffer.input, line_buffer);
+                            cmd_buffer.state = CMD_STATE_TYPING;
+                        }
+                        xSemaphoreGive(cmd_buffer.mutex);
+                    }
+                } else if (keycode == 0xB6) { //down
+                    if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100))) {
+                        if (history_peek_idx > 0) {
+                            history_peek_idx--;
+                            int idx = cmd_buffer.history_count - 1 - history_peek_idx;
+                            strcpy(line_buffer, cmd_buffer.history[idx]);
+                            line_pos = strlen(line_buffer);
+                            strcpy(cmd_buffer.input, line_buffer);
+                        } else if (history_peek_idx == 0) {
+                            history_peek_idx = -1;
+                            line_buffer[0] = '\0';
+                            line_pos = 0;
+                            strcpy(cmd_buffer.input, line_buffer);
+                        }
+                        cmd_buffer.state = CMD_STATE_TYPING;
+                        xSemaphoreGive(cmd_buffer.mutex);
+                    }
+                }
+                last = keycode;
+                continue;
+            }
+
+
             // Adds key char to queue
             if (keycode >= 0x20 && keycode <= 0x7E) { // Printable ASCII
+                history_peek_idx = -1;
                 if (line_pos < CMD_BUFFER_SIZE - 1) {
                     line_buffer[line_pos++] = (char)keycode;
                     line_buffer[line_pos] = '\0';

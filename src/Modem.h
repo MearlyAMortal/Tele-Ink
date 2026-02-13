@@ -23,6 +23,7 @@
 
 typedef struct ModemCmd {
     bool waitForOK;
+    bool noTx;
     char cmd[256];
     char resp[1024];
     uint32_t timeout_ms;
@@ -33,8 +34,9 @@ typedef struct ModemCmd {
 
 // Public
 bool Modem_Init(HardwareSerial *serial, int rxPin, int txPin, int powerPin);
-bool Modem_SendAT(const char *cmd, char *resp, size_t respLen, uint32_t timeoutMs);
+bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeout_ms);
 void Modem_TogglePWK(uint32_t duration_ms);
+bool Modem_SendSMS(const char *message, const char* number, uint32_t timeout_ms);
 
 // Private
 

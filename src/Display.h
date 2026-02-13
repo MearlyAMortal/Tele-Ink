@@ -4,7 +4,7 @@
 * | Function    :   Owns one reusable framebuffer,
 *                   EPD power sequence, 
 *                   display task and Display_PostEvent queue.
-* | Info        :
+* | Info        :   Not Re-initilizing 4gray correctly ATM (no issues yet)
 *----------------
 * |	This version:   V0.0.1
 * | Date        :   2025-12-18
@@ -13,7 +13,7 @@
 ******************************************************************************/
 #ifndef DISPLAY_H
 #define DISPLAY_H
-
+#include "GUI_Paint.h" //for paint_time
 #include "DEV_Config.h"
 
 // Canvas
@@ -26,6 +26,7 @@ void Display_Deinit(void);
 // Page management
 typedef enum {
     PAGE_NONE = 0,
+    PAGE_BOOT,
     PAGE_HOME,
     PAGE_IDLE,
     PAGE_COMMAND,
@@ -37,9 +38,9 @@ extern bool screen_on;
 
 // Display events
 typedef enum {
-    DISP_EVT_NONE,
-    DISP_EVT_WAKE,
-    DISP_EVT_SLEEP, // Screen major updates
+    DISP_EVT_NONE = 0,
+    DISP_EVT_WAKE, // Screen major updates
+    DISP_EVT_SLEEP,
     DISP_EVT_SHOW_HOME, 
     DISP_EVT_SHOW_COMMAND,
     DISP_EVT_SHOW_IDLE,
@@ -80,6 +81,16 @@ typedef struct {
 
 extern CommandBuffer cmd_buffer;
 
+// modem
+extern bool modem_ready;
+extern bool modem_net;
+extern bool modem_powered;
+// Keyboard / command / modem
+extern bool sms_send;
+extern bool sms_read;
+extern int sms_count;
+extern bool at_mode;
+
 // Post event to display task
 bool Display_PostEvent(const DisplayEvent *evt, TickType_t ticksToWait);
 void Display_Event_Wake(void);
@@ -90,8 +101,7 @@ void Display_Event_ShowCommand(void);
 void Display_Event_WifiConnected(void);
 // Update internal display ds
 void Display_ClearCommandHistory(void);
-//void Display_Event_UpdateLineBuffer(void);
-//void Display_Event_DoneCommand(void);
+
 
 
 #endif // DISPLAY_H

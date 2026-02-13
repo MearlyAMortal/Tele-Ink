@@ -1,7 +1,7 @@
 /*****************************************************************************
 * | File      	:   Command.h
 * | Author      :   Logan Puntous
-* | Function    :   Recives command strings, processes them and returns responses
+* | Function    :   Reterives commands from the keyboard buffer, processes them, and updates the display/modem/etc.
 * | Info        :
 *----------------
 * |	This version:   V0.0.1
@@ -17,7 +17,5 @@
 #include "DEV_Config.h"
 
 void Command_Handle(void);
-
-
 
 #endif // COMMAND_H
