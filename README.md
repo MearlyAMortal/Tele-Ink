@@ -52,10 +52,13 @@ $ /sms ru            - Read unread messages stored on sim
 6. ModemTask waits for commands in the queue and or reads incoming data 
 7. ModemSendAT takes semaphore and the original task gives back (for response safety)
 8. KeyboardInit() Starts a new task that polls for incoming data on I2C 0x5F
-9. KeyboardTask doesnt need debounce (release = 1 stroke), and when a key is encountered, posts events for other tasks
-10. WiFi is underdeveloped at the moment but can poll for nearby networks or connect to one.
-11. All of the tasks have a timeout feature that will increase time between loops to save resources
-12. Every 60 partial updates send fullscreen refresh to prevent ghosting
+9. Keyboardtask will enter sequential mode and start the cmd_buffer if the page is command page
+10. KeyboardTask doesnt need debounce (release = 1 stroke), and when a special key is encountered, posts events for other tasks
+11. Command takes a c-string as input and returns a response as well as posting events
+12. Command history and command buffer is held until esc or /clear
+13. WiFi is underdeveloped at the moment but can poll for nearby networks or connect to one.
+14. All of the tasks have a timeout feature that will increase time between loops to save resources
+15. Every 60 partial updates send fullscreen refresh to prevent ghosting
 
 # Tech Stack
 ## Hardware/Communication
