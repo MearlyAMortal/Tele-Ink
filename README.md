@@ -1,8 +1,7 @@
 # Tele-Ink
-## A WIP FreeRTOS based 4G/WiFi IoT device that utilizes a E-Ink display for low power
+## A FreeRTOS based 4G/WiFi IoT device that utilizes a E-Ink display for low power
 
-<img src="/examples/IMG_0247.JPG" alt="Alt Text" width="400" height="500">
-
+<img src="/examples/IMG_0247.JPG" alt="Alt Text" width="400" height="600">
 
 # Usage
 * You must wait ~20 seconds for modem coldstart + system recognition for AT
@@ -32,17 +31,17 @@ $ /sim net           - Send AT+CREG? and handle URC auto
 $ /esp rst           - Restart ESP32
 $ /at CMD            - Send raw single line AT command
 $ /at                - Enter AT mode
-  AT_                - Type AT command ex: H, +CNUM (AT is prepented)
-  AT/exit            - Exit AT mode
+  AT_                  - Type AT command ex: H, +CNUM (AT is prepented)
+  AT/exit              - Exit AT mode
 $ /sms s NUMBER      - Start SMS send mode to NUMBER
 $ /sms s             - Start SMS send mode to saved NUMBER
-  > MESSAGE          - Send SMS MESSAGE to NUMBER
-  > /exit            - Exit SMS send mode
+  > MESSAGE            - Send SMS MESSAGE to NUMBER
+  > /exit              - Exit SMS send mode
 $ /sms ra            - Read all messages stored on sim 
 $ /sms ru            - Read unread messages stored on sim
-  : ID               - If there are X messages to read choose idx starting at 0
-  : /d ID            - Delete message from sim
-  : /exit            - Exit SMS read mode
+  : ID                 - If there are X messages to read choose idx starting at 0
+  : /d ID              - Delete message from sim
+  : /exit              - Exit SMS read mode
 ```
 # High level Code functionality
 1. Starting at Tele-Ink.ino
