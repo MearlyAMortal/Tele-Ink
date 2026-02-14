@@ -1,6 +1,9 @@
 # Tele-Ink
 ## A WIP FreeRTOS based 4G/WiFi IoT device that utilizes a E-Ink display for low power
 
+<img src="/examples/IMG_0247.JPG" alt="Alt Text" width="400" height="500">
+
+
 # Usage
 * You must wait ~20 seconds for modem coldstart + system recognition for AT
 * You can change screen page using sym+key (home h, idle i, command c)
