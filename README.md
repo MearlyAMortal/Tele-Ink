@@ -1,18 +1,20 @@
 # Tele-Ink
-## A FreeRTOS based 4G/WiFi IoT device that utilizes a E-Ink display for low power
+## A FreeRTOS based 4GLTE/WiFi IoT device that utilizes a E-Ink display for low power
 
 <img src="/examples/IMG_0247.JPG" alt="Alt Text" width="400" height="600">
 
 # Usage
 * You must wait ~20 seconds for modem coldstart + system recognition for AT
+* Sym+key can be used for major screen updates and or page changes
 * You can change screen page using sym+key (home h, idle i, command c)
 * Sleep/Wake button clears screen on sleep (sym+esc)
-* Home page shows time(soon) and dynamic relevant system information
+* Home page shows time(soon) and dynamic relevant system information (basic)
 * Idle page has a VCR style box bouncing around on the edges of the screen
 * Display_1Gray_Part not working so ~500ms refreshrate is best so far
 * Command page causes keyboard to enter sequential mode for typing
-* Commands start with / else echo input 
+* Commands start with '/' char else echo input 
 * Command buffer is accessed atomically by display to show user text(producer/viewer)
+* Command buffer is accessed atomically for modem commands and updating responses
 * Command history is saved and can be accessed by using arrow keys
 * Command prompt corresponds to specifc mode you are currently in ($, AT, >, :)
 * Command modes include (Base $, at mode AT, sms read :, sms write >)
@@ -20,6 +22,7 @@
 * It will save state, history and text buffer unless you /clear or esc from page
 * Command screen is encapsulated and dynamic so text will wrap and push elements up until there is room
 * Queuing display events will cause a fullscreen refresh
+* WARNING the epd api from waveshare requires 4Gray to be initlizied before fullscreen changes. (It only initilizes once at start) STABLE
 
 ## Commands
 ```
@@ -85,8 +88,8 @@ $ /sms ru            - Read unread messages stored on sim
 ```
                   ┌──────────────────────────────────┐                                                            
                   │                                  │                                                            
-                  │                                  ┼─────────────┐                                              
-                  │                                  ┼───────────┐ │                                              
+                  │                                  ◄─────────────┐                                              
+                  │                                  ◄───────────┐ │                                              
                   │        2500mAh LiPo 1s           │           │ │                DATA                          
                   │                                  │           │ │            ──────────────                    
                   │                                  │           │ │                POWER                         
@@ -111,18 +114,18 @@ $ /sms ru            - Read unread messages stored on sim
   │  │                                    │  │         │ │    │ │                                           │ │   
   │  │                                    │  │        ┌┘┌┘┌───▼─▼─────────┐                                 │ │   
   │  └────────────────────────────────────┘  ├────────┼─┼─┤               │     GND      ┌──────────────────▼─▼──┐
-  │                                          │    SPI │ │ │               ┼──────────────┼                       │
+  │                                          │  SPI 4 │ │ │               ┼──────────────┼                       │
   └──────────────────────────────────────────┴────────┼─┼─┼               │    17-TXD    │                       │
                                                       └┐└┐│    ESP32      ┼──────────────┤                       │
 ┌─────────────────────────────────────────────┐        │ ││               │    16-RXD    │                       │
 │              M5Stack Keyboard               ◄────────┘ ││               ┼──────────────┤                       │
-│                                             ◄──────────┘│               │     4-PWK    │                       │
+│                                             ◄──────────┘│               │    4-PWK     │                       │
 │                                             │           │               ┼──────────────┤      SIM7600G-H       │
 │                                             │           └──┬──┬─────────┘              │                       │
 │                                             │  DATA-21     │  │                        │                       │
-│                                             ┼──────────────┘  │                        │                       │
+│                                        472  ┼──────────────┘  │                        │                       │
 │                                             │  CLK-22         │                        │                       │
-│                                             ┼─────────────────┘                        │                       │
+│                                        472  ┼─────────────────┘                        │                       │
 │                                             │                                          │                       │
 │                                             │                                          └───────────────────────┘
 │                                             │                                                                   
