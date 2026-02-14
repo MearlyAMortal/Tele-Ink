@@ -32,6 +32,7 @@ $ /at                - Enter AT mode
   AT_                - Type AT command ex: H, +CNUM (AT is prepented)
   AT/exit            - Exit AT mode
 $ /sms s NUMBER      - Start SMS send mode to NUMBER
+$ /sms s             - Start SMS send mode to saved NUMBER
   > MESSAGE          - Send SMS MESSAGE to NUMBER
   > /exit            - Exit SMS send mode
 $ /sms ra            - Read all messages stored on sim 
