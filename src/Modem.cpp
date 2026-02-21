@@ -7,6 +7,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
+
 // Pins
 static HardwareSerial *modemSerial = nullptr;
 static uint8_t modemPowerPin = -1;
@@ -16,6 +17,7 @@ static uint8_t modem_tx_pin = -1;
 // Modem state
 static SemaphoreHandle_t modem_mutex = NULL;
 static TaskHandle_t modem_task_handle = NULL;
+static TaskHandle_t modem_status_task_handle = NULL;
 static QueueHandle_t modem_cmd_queue = NULL;
 static ModemCmd *current_cmd = NULL;
 
@@ -139,48 +141,54 @@ static bool Modem_WaitAndFree(ModemCmd *w, uint32_t timeout_ms) {
 }
 
 
-bool Modem_SendSMS(const char *number, const char *message, uint32_t timeout_ms) {
-    if (!number || !number[0] || !message) return false;
-    //printf("SMS: starting to %s\r\n", number);
-    char tmp[512] = {0};
-    /*
-    if (!Modem_SendAT("AT+CMGF=1", tmp, sizeof(tmp), timeout_ms)) {
+// Returns true if modem mode was set or already in that mode, false if error
+bool Modem_SetCheckMode(uint8_t mode) {
+    if (mode != 0 && mode != 1) return false;
+
+    if (mode == modem_mode) return true;
+
+    char tmp[32] = {0};
+    if (!Modem_SendAT("AT+CMGF=1", tmp, sizeof(tmp), 2000)) {
         printf("SMS: CMGF failed\r\n");
         return false;
     }
-        */
-    //printf("SMS: CMGF ok\r\n");
-    char cmgs[96];
+    modem_mode = mode;
+    return true;
+}
+
+
+// Send message to number, get prompt, write message and ctrl+z, wait for response. Returns true if OK received, false if error or timeout.
+bool Modem_SendSMS(const char *number, const char *message, uint32_t timeout_ms) {
+    if (!number || !number[0] || !message) return false;
+
+    if (!Modem_SetCheckMode(1)) return false;
+    char cmgs[96] = {0};
+    char resp[32] = {0};
     snprintf(cmgs, sizeof(cmgs), "AT+CMGS=\"%s\"", number);
-    Modem_SendAT(cmgs, tmp, sizeof(tmp), timeout_ms);
-    //printf("SMS: CMGS resp: %s\r\n", tmp);
-    if (strchr(tmp, '>') == NULL) {
+    Modem_SendAT(cmgs, resp, sizeof(resp), timeout_ms);
+    if (strchr(resp, '>') == NULL) {
         printf("SMS: no > prompt\r\n");
         return false;
     }
-    //printf("SMS: got > prompt\r\n");
 
     ModemCmd *w = Modem_QueueWaitOnly(timeout_ms);
     if (!w) return false;
-
     DEV_Delay_ms(100);
 
     if (!Modem_WriteRaw((uint8_t*)message, strlen(message), timeout_ms)) {
         printf("SMS: write body failed\r\n");
         return false;
     }
-    //printf("SMS: wrote body\r\n");
 
     const uint8_t ctrlz = 0x1A;
     if (!Modem_WriteRaw(&ctrlz, 1, timeout_ms)) {
         printf("SMS: write ctrlz failed\r\n");
         return false;
     }
-    //printf("SMS: wrote ctrlz, waiting for OK\r\n");
     bool ok = Modem_WaitAndFree(w, timeout_ms);
-    //printf("SMS: final result = %s\r\n", ok ? "OK" : "FAIL");
     return ok;
 }
+
 
 
 // Sends AT command to modem and waits for response. (safe)
@@ -231,11 +239,15 @@ static bool Modem_HandleURC(const char *line) {
         printf("Modem network connected!\r\n");
         DisplayEvent e = { .type = DISP_EVT_MODEM_NET, .payload = NULL};
         Display_PostEvent(&e, 0);
-        DEV_Delay_ms(250); // Wait for display task to process net event and update modem_net before we
+        DEV_Delay_ms(250); // Wait for display task to process event and update modem_net before we return
         return true;
     } 
-    else if (strncmp(line, "+CMT:", 5) == 0) {
-        printf("SMS recieved!\r\n");
+    else if (strncmp(line, "+CMTI:", 6) == 0) {
+        printf("SMS recieved! Index: %s\r\n", line + 12);
+        DisplayEvent e = { .type = DISP_EVT_SMS_RECEIVED, .payload = NULL};
+        Display_PostEvent(&e, 0);
+        DEV_Delay_ms(250);
+        return true;
     }
     else {
         printf("Modem URC unhandled: %s\r\n", line);
@@ -243,54 +255,140 @@ static bool Modem_HandleURC(const char *line) {
     return false;
 }
 
+// Returns true if state changed. update internal based on phyisical state (mostly helpful for communication between displayTask)
+bool Modem_CheckStatus(void) {
+    // modemTask must have been deinitialized or serial = nullptr or something catostrophic happened if modemSerial is null at this point
+    if (!modemSerial && modem_serial_begun) {
+        // NEED TO UPDATE SERIAL
+        DisplayEvent e = { .type = DISP_EVT_MODEM_LOST, .payload = NULL};
+        Display_PostEvent(&e, 0);
+        DEV_Delay_ms(250);
+        return true;
+    }
+    // Take mutex for entire check to prevent modemTask from doing too much fr tho
+    // Give before each return but after the delay to ensure display task has time to process event and update modem state before we potentially check again or do something else with the modem
+    if (modem_mutex && xSemaphoreTake(modem_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        printf("Modem_CheckStatus: failed to take modem_mutex (timeout)\r\n");
+        return false;
+    }
+    // Begin serial if not already begun (handles first power on or restart case, but also modemTask deinit case where we set modemSerial to null but didnt update state yet)
+    if (!modem_serial_begun) {
+        modemSerial->begin(115200, SERIAL_8N1, modem_rx_pin, modem_tx_pin);
+        modemSerial->flush();
+        DEV_Delay_ms(100);
+        modem_serial_begun = true;
+    }
+    // Send AT to check if modem is ready
+    modemSerial->print("AT\r\n");
+    unsigned long start = millis();
+    char resp[64] = {0};
+    int idx = 0;
+
+    // Read response with timeout
+    while (millis() - start < 1000 && idx < sizeof(resp) - 1) {
+        if (modemSerial->available()) {
+            char c = modemSerial->read();
+            resp[idx++] = c;
+            resp[idx] = '\0';
+            if (strstr(resp, "OK")) {
+                break;
+            }
+        }
+    }
+    // No response dont continue
+    if (strstr(resp, "OK") == NULL) {
+        // Did we lose the modem or is it just not ready?
+        if (modem_ready || modem_net) {
+            DisplayEvent e = { .type = DISP_EVT_MODEM_LOST, .payload = NULL};
+            Display_PostEvent(&e, 0);
+            DEV_Delay_ms(250);
+            xSemaphoreGive(modem_mutex);
+            return true;
+        } else {
+            xSemaphoreGive(modem_mutex);
+            return false;
+        }
+    }
+    // At least ready at this point
+    // Manually check registration status to prevent handleURC from being the only way to set modem_net
+    resp[0] = '\0';
+    DEV_Delay_ms(100);
+    modemSerial->print("AT+CREG?\r\n");
+    DEV_Delay_ms(100);
+    start = millis();
+    idx = 0;
+    while (millis() - start < 1000 && idx < sizeof(resp) - 1) {
+        if (modemSerial->available()) {
+            char c = modemSerial->read();
+            resp[idx++] = c;
+            resp[idx] = '\0';
+            if (strstr(resp, "0,5") || strstr(resp, "0,1")) {
+                if (!modem_net) {
+                    DisplayEvent e = { .type = DISP_EVT_MODEM_NET, .payload = NULL};
+                    Display_PostEvent(&e, 0);
+                    DEV_Delay_ms(250);
+                    xSemaphoreGive(modem_mutex);
+                    return true;
+                }
+            }
+        }
+    }
+    // Not registered = no network
+    if (strstr(resp, "0,5") == NULL && strstr(resp, "0,1") == NULL) {
+        if (modem_net) {
+            DisplayEvent e = { .type = DISP_EVT_MODEM_LOST, .payload = NULL};
+            Display_PostEvent(&e, 0);
+            DEV_Delay_ms(250);
+            xSemaphoreGive(modem_mutex);
+            return true;
+        } 
+        if (!modem_ready) {
+            DisplayEvent e = { .type = DISP_EVT_MODEM_READY, .payload = NULL};
+            Display_PostEvent(&e, 0);
+            DEV_Delay_ms(250);
+            xSemaphoreGive(modem_mutex);
+            return true;
+        }
+    }
+    xSemaphoreGive(modem_mutex);
+    return false;
+}
+
+// Modem background task to handle the modems physical state
+static void ModemStatusTask(void *pv) {
+    (void)pv;
+    for (;;) {
+        if (Modem_CheckStatus()) {
+            printf("Modem status changed!\r\n");
+        }
+        DEV_Delay_ms(30000);
+    }
+}
+
+static void Modem_StartStatusTask(void) {
+    // Less prioriety than main task
+    xTaskCreatePinnedToCore(ModemStatusTask, "modemStatus", 4096, NULL, 3, &modem_status_task_handle, 1);
+}
 
 // Modem background task to handle command queue and URCs
+// ready/powered/net State is external in display and handled by display events
 static void modemTask(void *pv) {
     (void)pv;
+    TaskHandle_t status_task_handle = NULL;
     char line[256];
     size_t idx = 0;
 
     printf("Waiting 20s for modem coldstart\r\n");
     DEV_Delay_ms(20000);
-    
 
-    modemSerial->begin(115200, SERIAL_8N1, modem_rx_pin, modem_tx_pin);
-    modemSerial->flush();
-    DEV_Delay_ms(100);
-    modem_serial_begun = true;
+    // Create status check task
+    Modem_StartStatusTask();
 
-    for (int i = 0; i < 3; ++i) {
-        modemSerial->print("AT\r\n");
-        DEV_Delay_ms(500);
-
-        while (modemSerial->available()) {
-            char resp[32];
-            size_t len = modemSerial->readBytesUntil('\n', resp, sizeof(resp)-1);
-            resp[len] = '\0';
-            while (len > 0 && isspace(resp[len - 1])) {
-                resp[--len] = '\0';
-            }
-            if (strcmp(resp, "OK") == 0) {
-                printf("Modem is ready!\r\n");
-                DisplayEvent e = { .type = DISP_EVT_MODEM_READY, .payload = NULL};
-                Display_PostEvent(&e, 0);
-                DEV_Delay_ms(250); // Wait for display task to process ready event and update modem_ready before we
-            }
-            if (modem_ready) break;
-        }
-        if (modem_ready) break;
-        //printf("Modem not responding to AT, retrying...\r\n");
-        DEV_Delay_ms(1000);
-    }
-
-    char tmp[256];
-    Modem_SendAT("AT+CREG?", tmp, sizeof(tmp), 5000);
-    
     // Init complete, enter main loop to handle commands and URCs
     for (;;) {
-        // if modem not ready, wait and loop
-        if (!modemSerial || !modem_ready) {
-            DEV_Delay_ms(2500);
+        // if modem not ready, check current status
+        if (!modem_ready || !modemSerial) {
+            DEV_Delay_ms(5000);
             continue;
         }
 
@@ -323,10 +421,8 @@ static void modemTask(void *pv) {
         // 2) Read available bytes and accumulate lines
         while (modemSerial->available()) {
             int c = modemSerial->read();
-            //printf("read=%d\r\n", c);
             if (c < 0) break;
-
-            // If we're waiting for OK and we see '>', treat it like "response ready" for AT+CMGS.
+            // If we're waiting for OK and we see '>', send ready AT+CMGS
             if (current_cmd && current_cmd->waitForOK && c == '>') {
                 // Only treat as SMS prompt if the command sms
                 if (strncmp(current_cmd->cmd, "AT+CMGS", 7) == 0) {
@@ -337,24 +433,18 @@ static void modemTask(void *pv) {
                     continue;
                 }
             }
-
             if (idx < sizeof(line) - 1) line[idx++] = (char)c;
-            
             if (c == '\n') {
                 // strip CR/LF
                 while (idx > 0 && (line[idx-1] == '\r' || line[idx-1] == '\n')) idx--;
                 line[idx] = '\0';
-
-                // debug log
+                // DEBUG
                 if (line[0] != '\0') printf("Modem RX: %s\r\n", line);
-
-                //printf("Modem RX: %s\r\n", line);
                 if (idx > 0) {
                     if (current_cmd) {
                         // append to response transcript
                         strncat(current_cmd->resp, line, sizeof(current_cmd->resp) - strlen(current_cmd->resp) - 2);
                         strncat(current_cmd->resp, "\n", sizeof(current_cmd->resp) - strlen(current_cmd->resp) - 1);
-
                         if (current_cmd->waitForOK) {
                             if (strcmp(line, "OK") == 0 || strcmp(line, "ERROR") == 0 ||
                                 strstr(line, "+CME ERROR") || strstr(line, "+CMS ERROR")) {

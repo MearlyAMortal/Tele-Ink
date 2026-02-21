@@ -40,10 +40,10 @@ void setup() {
     //WiFi_StartScanner(120000);
     //WiFi_ConnectBlocking(WIFI_SSID,WIFI_PASSWORD, 15000);
     //WiFi_Init();
-
-
-    Display_Event_ShowHome();
-
+    
+    // Starting page
+    //Display_Event_ShowHome();
+    Display_Event_ShowIdle();
     printf("Setup complete!\r\n");
 
 }

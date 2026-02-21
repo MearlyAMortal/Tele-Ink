@@ -20,23 +20,27 @@ PageType current_page = PAGE_NONE;
 PageType last_page = PAGE_NONE;
 PageType boot_page = PAGE_BOOT;
 CommandBuffer cmd_buffer = {0};
-
 bool modem_ready = false;
 bool modem_net = false;
 bool modem_powered = false;
+uint8_t modem_mode = 1;   // Default text mode not PDU mode
 bool sms_send = false;
 bool sms_read = false;
 int sms_count = 0;
 bool at_mode = false;
-//char* sms_number = NULL;
-
+bool gnss_mode = false;
+bool gnss_on = false;
 // Private
 // Screen
+static UBYTE *reusable_buf = NULL;
+static UWORD *reusable_size = 0;
 static UBYTE *image_buf1 = NULL;
 static UWORD image_size1 = 0;
 static UBYTE *image_buf4 = NULL;
 static UWORD image_size4 = 0;
 static uint8_t GRAY_MODE = 4;
+static uint32_t display_w = 0;
+static uint32_t display_h = 0;
 // screenTask
 static SemaphoreHandle_t epd_mutex = NULL;
 static QueueHandle_t dispQueue = NULL;
@@ -47,18 +51,15 @@ static TickType_t last_activity_tick = 0;
 static uint32_t idle_page_tick_count = 0;
 static bool page_change_evt = false;
 static uint32_t partial_update_count = 0;
-
-
 // Modem
-static int unread_sms = 0;
+//static int unread_sms = 0;
 static bool ringing = false;
 static TickType_t end = 0;
-
-
 // Wifi
 static bool wifi_connected = false;
 static bool wifi_on = false;
-
+// Paint
+static char idle_c[2] = {0};
 // FD Painting functions
 static UWORD getImageSizeForMode(uint8_t gray);
 static void paintConfigureForMode(uint8_t gray);
@@ -135,17 +136,32 @@ static void paintHomeScreen(void) {
     } else {
         Paint_DrawString_EN(10, 40, "Modem -", &Font16, BLACK, WHITE);
     }
+
+    // GNSS
+    if (gnss_on) {
+        Paint_DrawString_EN(10, 60, "GNSS +", &Font16, BLACK, WHITE);
+    } else {
+        Paint_DrawString_EN(10, 60, "GNSS -", &Font16, BLACK, WHITE);
+    }
+
+    // SMS (temporary)
+    if (sms_count > 0 && !sms_read) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "SMS New: %d", sms_count);
+        Paint_DrawString_EN(10, 80, buf, &Font16, BLACK, WHITE);
+    } else {
+        Paint_DrawString_EN(10, 80, "SMS: 0", &Font16, BLACK, WHITE);
+    }
     
     // WIFI
     if (wifi_on){
-        Paint_DrawString_EN(10, 60, "Wifi +", &Font16, BLACK, WHITE);
+        Paint_DrawString_EN(10, 100, "Wifi +", &Font16, BLACK, WHITE);
         if (wifi_connected){
-            Paint_DrawString_EN(10, 60, "Wifi ++", &Font16, BLACK, WHITE);
+            Paint_DrawString_EN(10, 100, "Wifi ++", &Font16, BLACK, WHITE);
         }
     } else {
-        Paint_DrawString_EN(10, 60, "Wifi -", &Font16, BLACK, WHITE);
+        Paint_DrawString_EN(10, 100, "Wifi -", &Font16, BLACK, WHITE);
     }
-    
      
 }
 static void paintCommandScreen(void) {
@@ -171,11 +187,11 @@ static void paintBootScreen(void) {
     Paint_DrawCircle(105, 95, 20, WHITE, DOT_PIXEL_1X1, DRAW_FILL_FULL);
     Paint_DrawLine(85, 95, 125, 95, BLACK, DOT_PIXEL_1X1, LINE_STYLE_DOTTED);
     Paint_DrawLine(105, 75, 105, 115, BLACK, DOT_PIXEL_1X1, LINE_STYLE_DOTTED);
-    Paint_DrawString_EN(10, 0, "Logan P", &Font16, BLACK, WHITE);
+    Paint_DrawString_EN(10, 5, "Logan P", &Font16, BLACK, WHITE);
     Paint_DrawString_EN(10, 20, "NoobPhone v0.2.1", &Font12, WHITE, BLACK);
     Paint_DrawNum(10, 33, 123456789, &Font12, BLACK, WHITE);
     Paint_DrawNum(10, 50, 987654321, &Font16, WHITE, BLACK);
-    Paint_DrawString_EN(10, 150, "You can change modes w/ Sym", &Font24, BLACK, GRAY1);
+    Paint_DrawString_EN(10, 150, "You can change modes w/ sym", &Font24, BLACK, GRAY1);
     Paint_DrawString_EN(10, 175, "In command mode use  /<cmd>", &Font24, WHITE, GRAY2);
     Paint_DrawString_EN(10, 200, "You can execute AT commands", &Font24, WHITE, GRAY3);
     Paint_DrawString_EN(10, 225, "Global Roaming GNSS 4G Data", &Font24, WHITE, GRAY4);
@@ -287,7 +303,7 @@ static void Display_UpdateFullScreen(void) {
 
 // Paints 4gray background image then gets ready for partial update if needed
 static void Display_HandleScreenChange(void) {
-    printf("Display_HandleScreenChange\r\n");
+    //printf("Display_HandleScreenChange\r\n");
     if (current_page == PAGE_NONE) return;
 
     paintCurrentPage();
@@ -302,7 +318,7 @@ static void Display_HandleScreenChange(void) {
         GRAY_MODE = 1;
     } else {
         // Init 4Gray
-        printf("Initializing 4Gray mode not\r\n");
+        //printf("Initializing 4Gray mode not\r\n");
         //EPD_3IN7_4Gray_Init(); 
         //DEV_Delay_ms(20);
         GRAY_MODE = 4;
@@ -339,6 +355,8 @@ static void HandlePartialUpdate_command(void) {
         snprintf(display_line, sizeof(display_line), "SMS: %s_", current_input);
     } else if (at_mode){
         snprintf(display_line, sizeof(display_line), "AT%s_", current_input);
+    } else if (gnss_mode){
+        snprintf(display_line, sizeof(display_line), "GNSS: %s_", current_input);
     } else {
         snprintf(display_line, sizeof(display_line), "$ %s_", current_input);
     }
@@ -399,6 +417,10 @@ static void HandlePartialUpdate_command(void) {
     EPD_3IN7_1Gray_Display(image_buf1);
 }
 
+
+
+
+// Clear screen, small pseudo random animation to prevent burn in during idle
 static void HandlePartialUpdate_idle(void) {
     // small bouncing rectangle (VCR-style) animation
     // x and y are reversed! W = .x
@@ -406,24 +428,28 @@ static void HandlePartialUpdate_idle(void) {
     static int rx, ry, rw, rh;
     static int prev_rx, prev_ry;
     static int vx, vy;
+    idle_c[1] = '\0';
+    if (idle_c[0] < 'A' || idle_c[0] > 'Z') {
+        idle_c[0] = 'A';
+    }
 
-    int W = EPD_3IN7_HEIGHT;
-    int H = EPD_3IN7_WIDTH;
     int margin = 4;
     int ex0, ey0, ex1, ey1;
     int dx0, dy0, dx1, dy1;
     int ix0, iy0, ix1, iy1;
+    int cx, cy;
+    
 
     if (!init) {
-        rw = 50; rh = 50;
-        rx = (W - rw) / 2;
-        ry = (H - rh) / 2;
+        rw = 64; rh = 64;
+        rx = (display_w - rw) / 2;
+        ry = (display_h - rh) / 2;
         prev_rx = rx; 
         prev_ry = ry;
         // seed pseudo-random with tick count
         srand((unsigned) xTaskGetTickCount());
-        do { vx = (int)(rand() % 5) + 5; } while (vx == 0);
-        do { vy = (int)(rand() % 5) + 5; } while (vy == 0);
+        do { vx = (int)(rand() % 8) + 4; } while (vx == 0);
+        do { vy = (int)(rand() % 8) + 4; } while (vy == 0);
         init = true;
     }
 
@@ -431,43 +457,45 @@ static void HandlePartialUpdate_idle(void) {
     margin = 4;
     ex0 = prev_rx - margin; if (ex0 < 0) ex0 = 0;
     ey0 = prev_ry - margin; if (ey0 < 0) ey0 = 0;
-    ex1 = prev_rx + rw + margin; if (ex1 >= W) ex1 = W - 1;
-    ey1 = prev_ry + rh + margin; if (ey1 >= H) ey1 = H - 1;
+    ex1 = prev_rx + rw + margin; if (ex1 >= display_w) ex1 = display_w - 1;
+    ey1 = prev_ry + rh + margin; if (ey1 >= display_h) ey1 = display_h - 1;
     Paint_ClearWindows(ex0, ey0, ex1, ey1, WHITE);
 
     // update position
     rx += vx;
     ry += vy;
-
     // bounce on horizontal edges
     if (rx <= 0) { // Left
         rx = 0;
         vx = -vx;
-        vx += (int)(rand() % 3) - 2;
-    } else if (rx + rw > W - 1) { // Right
-        rx = (W - 1) - (rw - 1);
+        vx += (int)(rand() % 8) - 4;
+        idle_c[0] = ((idle_c[0]+1) - 'A') % 26 + 'A';
+    } else if (rx + rw > display_w - 1) { // Right
+        rx = (display_w - 1) - (rw - 1);
         if (rx < 0) rx = 0;
         vx = -vx;
-        vx += (int)(rand() % 3) - 2;
+        vx += (int)(rand() % 8) - 4;
+        idle_c[0] = ((idle_c[0]+1) - 'A') % 26 + 'A';
     }
-
     // bounce on vertical edges
     if (ry <= 0) { // Top
         ry = 0;
         vy = -vy;
-        vy += (int)(rand() % 3) - 2;
-    } else if (ry + rh - 1 > H - 1) { // Bottom
-        ry = (H - 1) - (rh - 1);
+        vy += (int)(rand() % 8) - 4;
+        idle_c[0] = ((idle_c[0]+1) - 'A') % 26 + 'A';
+    } else if (ry + rh - 1 > display_h - 1) { // Bottom
+        ry = (display_h - 1) - (rh - 1);
         if (ry < 0) ry = 0;
         vy = -vy;
-        vy += (int)(rand() % 3) - 2;
+        vy += (int)(rand() % 8) - 4;
+        idle_c[0] = ((idle_c[0]+1) - 'A') % 26 + 'A';
     }
 
     // outer rectangle - clamp draw coordinates to valid inclusive range
     dx0 = rx; if (dx0 < 0) dx0 = 0;
     dy0 = ry; if (dy0 < 0) dy0 = 0;
-    dx1 = rx + rw - 1; if (dx1 > W - 1) dx1 = W - 1;
-    dy1 = ry + rh - 1; if (dy1 > H - 1) dy1 = H - 1;
+    dx1 = rx + rw - 1; if (dx1 > display_w - 1) dx1 = display_w - 1;
+    dy1 = ry + rh - 1; if (dy1 > display_h - 1) dy1 = display_h - 1;
     Paint_DrawRectangle(dx0, dy0, dx1, dy1, BLACK, DOT_PIXEL_1X1, DRAW_FILL_FULL);
 
     // inner rectangle - compute and clamp, draw only if valid
@@ -475,24 +503,60 @@ static void HandlePartialUpdate_idle(void) {
     iy0 = dy0 + 4;
     ix1 = dx1 - 4; 
     iy1 = dy1 - 4;
-    if (ix1 > ix0 && iy1 > iy0) {
-        Paint_DrawRectangle(ix0, iy0, ix1, iy1, WHITE, DOT_PIXEL_1X1, DRAW_FILL_FULL);
+    Paint_DrawRectangle(ix0, iy0, ix1, iy1, WHITE, DOT_PIXEL_1X1, DRAW_FILL_FULL);
+    // picture in picture
+    cx = dx0 + ((dx1 - dx0 + 0) - Font24.Width) / 2;
+    cy = dy0 + ((dy1 - dy0 + 3) - Font24.Height) / 2;
+    Paint_DrawString_EN(cx, cy, idle_c, &Font24, WHITE, BLACK);
+    //Paint_DrawString_CN(cx, cy, idle_c, &Font12CN, WHITE, BLACK);
+
+    //DEBUG
+    //Paint_DrawRectangle(0, 0, display_w, display_h, BLACK, DOT_PIXEL_1X1, DRAW_FILL_FULL);
+    
+    // Display final image
+    // Allocate region buffer'
+    /*
+    UWORD region_h = dy1 - dy0 + 1;
+    UWORD region_w = dx1 - dx0 + 1;
+    UWORD region_bytes_per_row = (region_w + 7) / 8;
+    UWORD full_bytes_per_row = (display_w + 7) / 8;
+    UBYTE region_buf[region_bytes_per_row * region_h];
+    memset(region_buf, 0, region_bytes_per_row * region_h);
+    // Copy region from main image buffer to region buffer
+    for (UWORD y = 0; y < region_h; y++) {
+        for (UWORD x = 0; x < region_w; x++) {
+            UWORD src_x = dx0 + y;
+            UWORD src_y = dy0 + x;
+
+            UWORD src_byte = src_x * full_bytes_per_row + (src_y / 8);
+            UBYTE src_bit = 7 - (src_y % 8);
+            UBYTE pixel = (image_buf1[src_byte] >> src_bit) & 0x01;
+
+            UWORD dst_byte = y * region_bytes_per_row + (x / 8);
+            UBYTE dst_bit = 7 - (x % 8);
+            if (pixel)
+                region_buf[dst_byte] |= (1 << dst_bit);
+        }
     }
-
-    // picture
-    ix0 = dx0 + ((dx1 - dx0 + 1) - (3 * Font24CN.Width)) / 2;
-    iy0 = dy0 + ((dy1 - dy0 + 1) - Font24CN.Height) / 2;
-    Paint_DrawString_CN((ix0) , (iy0), "闲置页", &Font24CN, WHITE, BLACK);
-
+    */
+    
+    // DEBUG
+    EPD_3IN7_1Gray_Display(image_buf1);
+    //EPD_3IN7_1Gray_Display(region_buf);
+    //EPD_3IN7_1Gray_Display_Part(image_buf1, dx0, dy0, dx1, dy1);
+    //EPD_3IN7_1Gray_Display_Part(image_buf1, dy0, dx0, dy1, dx1);
+    //EPD_3IN7_1Gray_Display_Part(region_buf, dy0, dx0, dy1, dx1);
+    //EPD_3IN7_1Gray_Display_Part(region_buf, dy0, display_w - 1 - dx1, dy1, display_w - 1 - dx0); //90
+    //EPD_3IN7_1Gray_Display_Part(region_buf, dy0, display_w - 1 - dx1, dy1, display_w - 1 - dx0); //270
+    //EPD_3IN7_1Gray_Display_Part(region_buf, 0, display_w - 1 - 64, 64, display_w - 1 - 0); //270 regularized
+    //EPD_3IN7_1Gray_Display_Part(region_buf, 0, 0, 64, 64);
+    // Rotate 180 degrees from 270 since the api regularizes axis to 90 degree rotation for this function? :)
+    //EPD_3IN7_1Gray_Display_Part(region_buf, display_w - 1 - dx1, display_h - 1 - dy1, display_w - 1 - dx0, display_h - 1 - dy0); //180
+    
     // save previous position for next clear
+    ++idle_page_tick_count;
     prev_rx = rx;
     prev_ry = ry;
-
-    ++idle_page_tick_count;
-    EPD_3IN7_1Gray_Display(image_buf1);
-    //EPD_3IN7_1Gray_Display_Part(image_buf1, dx0, dy0, dx1, dy1);
-    //EPD_3IN7_1Gray_Display_Part(image_buf1, 0, 0, W, H);
-    //printf("Rectangle at (%d,%d) to (%d,%d)\r\n", dx0, dy0, dx1, dy1);
 }
 // Handle partial updates for current page (drawing and displaying)
 static void Display_HandlePartialUpdate(void) {
@@ -503,14 +567,10 @@ static void Display_HandlePartialUpdate(void) {
         HandlePartialUpdate_command();
     }
     else if (current_page == PAGE_HOME) {
-        //Paint_DrawTime(370, 10, painttime, &Font20, WHITE, BLACK);
-        //if (modem_net)
         EPD_3IN7_1Gray_Display(image_buf1);
     }
     else if (current_page == PAGE_IDLE) {
         HandlePartialUpdate_idle();
-        //EPD_3IN7_1Gray_Display_Part(image_buf1);
-        //EPD_3IN7_1Gray_Display(image_buf1);
     }
     else {
         printf("No partial update\r\n");
@@ -524,6 +584,8 @@ static void displayTask(void *pv) {
     (void)pv;
     DisplayEvent evt;
     last_activity_tick = xTaskGetTickCount();
+    idle_c[0] = 'A'; // Start at a for idle character
+
     // Time
     //PAINT_TIME paint_time;
     //paint_time.Hour = 0;
@@ -554,7 +616,8 @@ static void displayTask(void *pv) {
                 case DISP_EVT_MODEM_POWERED: modem_powered = true; break;
                 case DISP_EVT_MODEM_READY: modem_ready = true; modem_powered = true; break;
                 case DISP_EVT_MODEM_NET: modem_ready = true; modem_powered = true; modem_net = true; break;
-                case DISP_EVT_SMS_RECEIVED: ++unread_sms; break;
+                case DISP_EVT_MODEM_LOST: modem_ready = false; modem_net = false; break;
+                case DISP_EVT_SMS_RECEIVED: ++sms_count; break;
                 case DISP_EVT_RING: ringing = true; break;
             }
             
@@ -658,6 +721,8 @@ void Display_Init(void) {
     // Create two empty canvass so paint APIs are ready to use
     Paint_NewImage(image_buf4, EPD_3IN7_WIDTH, EPD_3IN7_HEIGHT, 270, WHITE);
     Paint_NewImage(image_buf1, EPD_3IN7_WIDTH, EPD_3IN7_HEIGHT, 270, WHITE);
+    display_w = EPD_3IN7_HEIGHT;
+    display_h = EPD_3IN7_WIDTH;
     DEV_Delay_ms(200);
 
     // Start with displaying boot screen manually

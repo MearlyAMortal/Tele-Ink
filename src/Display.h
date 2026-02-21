@@ -49,6 +49,7 @@ typedef enum {
     DISP_EVT_MODEM_POWERED, // Modem
     DISP_EVT_MODEM_READY,
     DISP_EVT_MODEM_NET,
+    DISP_EVT_MODEM_LOST,
     DISP_EVT_SMS_RECEIVED,
     DISP_EVT_RING,
     DISP_EVT_CUSTOM_MSG,
@@ -85,11 +86,14 @@ extern CommandBuffer cmd_buffer;
 extern bool modem_ready;
 extern bool modem_net;
 extern bool modem_powered;
+extern uint8_t modem_mode;
 // Keyboard / command / modem
 extern bool sms_send;
 extern bool sms_read;
-extern int sms_count;
+extern int sms_count; 
 extern bool at_mode;
+extern bool gnss_mode;
+extern bool gnss_on;
 
 // Post event to display task
 bool Display_PostEvent(const DisplayEvent *evt, TickType_t ticksToWait);

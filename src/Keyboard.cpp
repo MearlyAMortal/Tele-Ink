@@ -138,6 +138,7 @@ static void keyTask(void *pv) {
                 sms_read = false;
                 sms_count = 0;
                 at_mode = false;
+                gnss_mode = false;
                 last = keycode;
                 Display_ClearCommandHistory();
                 Display_Event_ShowHome(); // Default to home

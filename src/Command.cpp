@@ -61,6 +61,20 @@ static bool Sms_IsValidNumber(const char* s) {
     return digits >= 10;
 }
 
+
+// Takes message number makes sure its numbers and subtracts 1 to correspond with idx not number
+static int ValidateID(const char* str){
+    if (!str || strlen(str) == 0) return -1;
+    
+    // Check all digits
+    for (int i = 0; str[i]; i++) {
+        if (str[i] < '0' || str[i] > '9') return -1;
+    }
+    
+    int idx = atoi(str);
+    return idx-1; // FIXING USER INPUT TO MATCH MODEM IDX NOT NUMBER
+}
+
 // Helper for parsing CMGS response
 static int CountSmsMessages(const char* resp) {
     if (!resp) return 0;
@@ -73,17 +87,74 @@ static int CountSmsMessages(const char* resp) {
     return count;
 }
 
-static int ValidateID(const char* str){
-    if (!str || strlen(str) == 0) return -1;
-    
-    // Check all digits
-    for (int i = 0; str[i]; i++) {
-        if (str[i] < '0' || str[i] > '9') return -1;
+// Collect unread sms message idxs for later retrieval
+static int GetUnreadSmsIndices(const char* resp, int* ids, int max_ids) {
+    int count = 0;
+    const char* p = resp;
+    while ((p = strstr(p, "+CMGL:")) != NULL && count < max_ids) {
+        const char* status = strchr(p, ',');
+        if (status && strstr(status, "\"REC UNREAD\"")) {
+            p += 6;
+            while (*p == ' ') p++;
+            int idx = atoi(p);
+            ids[count++] = idx;
+        }
+        p = strchr(p, '\n');
+        if (!p) break;
     }
-    
-    int idx = atoi(str);
-    return idx;
+    return count;
 }
+
+// make printable id response for display
+static void SetUnreadSmsNumbers(char* id_str, const int* ids, int um) {
+    for (int i = 0; i < um; i++) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d", ids[i] + 1);
+        strcat(id_str, buf);
+        if (i < um - 1) {
+            strcat(id_str, ",");
+        }
+    }
+}
+
+// Converts NMEA-style latitude/longitude to decimal degrees
+static double nmea_to_decimal(const char *val, char dir) {
+    double deg, min;
+    int deg_width = (dir == 'N' || dir == 'S') ? 2 : 3;
+    char deg_str[4] = {0};
+    strncpy(deg_str, val, deg_width);
+    deg = atof(deg_str);
+    min = atof(val + deg_width);
+    double dec = deg + min / 60.0;
+    if (dir == 'S' || dir == 'W') dec = -dec;
+    return dec;
+}
+
+
+// Converts GNSS input to a one-line summary
+void GNSS_ToOneLiner(const char *input, char *output, size_t out_size) {
+    char lat[16], ns, lon[16], ew, date[8], time[10], alt[8], spd[8];
+    // Parse the fields
+    int n = sscanf(input, "%15[^,],%c,%15[^,],%c,%6[^,],%9[^,],%7[^,],%7[^,]",
+        lat, &ns, lon, &ew, date, time, alt, spd);
+    if (n < 8) {
+        snprintf(output, out_size, "Error: Failed to fix or parse");
+        return;
+    }
+    double lat_dd = nmea_to_decimal(lat, ns);
+    double lon_dd = nmea_to_decimal(lon, ew);
+
+    // Format date and time
+    char date_fmt[16], time_fmt[16];
+    snprintf(date_fmt, sizeof(date_fmt), "20%c%c-%c%c-%c%c", date[4], date[5], date[2], date[3], date[0], date[1]);
+    snprintf(time_fmt, sizeof(time_fmt), "%c%c:%c%c:%c%c", time[0], time[1], time[2], time[3], time[4], time[5]);
+
+    // Output one-liner
+    snprintf(output, out_size,
+        "La: %.6f Lo: %.6f UTC: %s Date: %s Alt: %sm Spd: %skn",
+        lat_dd, lon_dd, time_fmt, date_fmt, alt, spd);
+}
+
 
 
 // Interprets keyboard input and responds with an error or display/modem/etc event.
@@ -100,71 +171,138 @@ void Command_Handle(void){
 
     TrimRight(in);
 
+    // WIZARDS
     // Check multi-line command mode first before handling base case
     // Send sms once collected number and message
     if (sms_send) {
         if (strcmp(in, "/exit") == 0) {
             Command_SetDone("Exiting SMS send");
             sms_send = false;
-            sms_number[0] = '\0';
             return;
         }
+        
         // We have number and message here
         if (Modem_SendSMS(sms_number, in, 45000)){
-            Command_SetDone("Message sent");
+            Command_SetDone("Message sent!");
             sms_send = false;
         } else {
-            Command_SetDone("Message failed to send");
-            sms_number[0] = '\0';
+            Command_SetDone("Error: SMS failed to send");
             sms_send = false;
         }
         return;
     } 
-    // Read messages based on index
+    // Read messages based on index (ru consumes messages, can also delete by index or all)
     else if (sms_read) {
-        if (strncmp(in, "/exit", 5) == 0 ) {
-            Command_SetDone("Exiting SMS read");
+        if (sms_count <= 0 && strcmp(in, "/s") != 0) {
+            Command_SetDone("Exiting: No SMS to read");
             sms_read = false;
             sms_count = 0;
             sms_read_all = false;
             return;
+        }
+        if (strncmp(in, "/exit", 5) == 0) {
+            Command_SetDone("Exiting SMS read");
+            sms_read = false;
+            if (sms_read_all){
+                sms_count = 0;
+                sms_read_all = false;
+            }
+            return;
         } 
-        char cmd[32] = {0};
-        char tmp[256] = {0};
 
+        // Responding to immediate previously read message with valid sms_number
+        if (strcmp(in, "/s") == 0 && sms_number[0] != '\0') {
+            sms_send = true;
+            char buf[32];
+            snprintf(buf, sizeof(buf), "Responding to: %s", sms_number); // Ensure null termination
+            Command_SetDone(buf);
+            return;
+        }
+        char cmd[32] = {0};
+        char tmp[512] = {0};
         // Deleting message
-        if (strncmp(in, "/d ", 3) == 0) {
-            int idd = ValidateID(in + 3);
-            if (idd < 0 || idd >= sms_count) {
-                Command_SetDone("Error: Invalid index");
+        if (strncmp(in, "/d", 2) == 0) {
+            // Delete all msgs on sim
+            if (strncmp(in, "/da", 3) == 0) {
+                Modem_SendAT ("AT+CMGD=1,4", tmp, sizeof(tmp), 5000);
+                if (strstr(tmp, "OK")) {
+                    sms_count = 0; 
+                    sms_read = false; 
+                    sms_read_all = false;
+                    Command_SetDone("Successfully deleted all SMS");
+                } else {
+                    Command_SetDone("Error: Failed to delete all SMS");
+                }
                 return;
             }
-            // Send delete AT
-            snprintf(cmd, sizeof(cmd), "AT+CMGD=%d", idd);
-            Modem_SendAT(cmd, tmp, sizeof(tmp), 5000);
-            if (strstr(tmp, "OK")) {
-                --sms_count;
-                Command_SetDone("Deleted message");
-            } else {
-                Command_SetDone("Error: Failed to delete");
+            // Delete message by idx
+            else if (strncmp(in, "/d ", 3) == 0) {
+                int idd = ValidateID(in + 3);
+                if (idd < 0 || idd >= sms_count) {
+                    Command_SetDone("Error: Invalid index");
+                    return;
+                }
+                // Send delete AT
+                snprintf(cmd, sizeof(cmd), "AT+CMGD=%d", idd);
+                Modem_SendAT(cmd, tmp, sizeof(tmp), 5000);
+                if (strstr(tmp, "OK")) {
+                    --sms_count;
+                    Command_SetDone("Successfully deleted index");
+                } else {
+                    Command_SetDone("Error: Failed to delete");
+                }
+                return;
             }
         }
         // Reading message by idx
         int idr = ValidateID(in);
         if (idr >= 0) {
+            // Send read AT and fix response and sms_count
             snprintf(cmd, sizeof(cmd), "AT+CMGR=%d", idr);
             Modem_SendAT(cmd, tmp, sizeof(tmp), 2000);
-            ReplaceControlChars(tmp);
-            Command_SetDone(tmp);
             if (!sms_read_all) --sms_count;
+            ReplaceControlChars(tmp);
+            // Get phone number saved for response and only display message body to user
+            char *num_start = strchr(tmp, '"');
+            char number[32] = {0};
+            int quote_count = 0;
+            const char *p = tmp;
+            while (*p) {
+                if (*p == '"') {
+                    quote_count++;
+                    if (quote_count == 3) {
+                        const char *start = p + 1;
+                        const char *end = strchr(start, '"');
+                        if (end && end - start < sizeof(number)) {
+                            strncpy(number, start, end - start);
+                            number[end - start] = '\0';
+                        }
+                        break;
+                    }
+                }
+                p++;
+            }
+            
+            //TrimRight(number);
+            if (Sms_IsValidNumber(number)) {
+                printf("Saving number: %s\r\n", number);
+                sms_number[0] = '\0';
+                strncpy(sms_number, number, sizeof(sms_number) - 1);
+                sms_number[sizeof(sms_number) - 1] = '\0';
+            } 
+            // Set output to message body only
+            // Skip the header
+            char *data = tmp + strlen("AT+CMGR=X +GMGR: ");
+            while (*data == ' ') data++;
+            Command_SetDone(data);
         } else {
-            Command_SetDone("Error: Invalid MSG ID provided");
+            Command_SetDone("Error: Invalid message number");
         }   
         return;
     }
     else if (at_mode) {
         if (strcmp(in, "/exit") == 0) {
-            Command_SetDone("Exiting AT");
+            Command_SetDone("Exiting AT mode");
             at_mode = false;
             return;
         } 
@@ -181,7 +319,56 @@ void Command_Handle(void){
         }
         return;
     }
+    else if (gnss_mode) {
+        if (strcmp(in, "/exit") == 0) {
+            Command_SetDone("Exiting GNSS mode");
+            gnss_mode = false;
+            return;
+        }  
+        char gnss_info[512] = {0};
+        gnss_info[0] = '\0';
+        if (strncmp(in, "on", 2) == 0) {
+            if (!Modem_SendAT("AT+CGPS=1", gnss_info, sizeof(gnss_info), 5000)){
+                Command_SetDone("Error: Failed to turn on GNSS");
+            } else {
+                ReplaceControlChars(gnss_info);
+                Command_SetDone("GNSS turned on wait for fix");
+                gnss_on = true;
+            }
+        } 
+        else if (strncmp(in, "off", 3) == 0) {
+            if (!Modem_SendAT("AT+CGPS=0", gnss_info, sizeof(gnss_info), 5000)){
+                Command_SetDone("Error: Failed to turn off GNSS");
+            } else {
+                ReplaceControlChars(gnss_info);
+                Command_SetDone("GNSS turned off");
+                gnss_on = false;
+            }
+        }
+        else if (strncmp(in, "info", 4) == 0) {
+            if (!gnss_on) {
+                Command_SetDone("Error: GNSS is not on");
+                return;
+            }
+            if (!Modem_SendAT("AT+CGPSINFO", gnss_info, sizeof(gnss_info), 5000)){
+                Command_SetDone("Error: Failed to get GNSS");
+            } else {
+                ReplaceControlChars(gnss_info);
+                char *data = gnss_info + strlen("AT+CGPSINFO +CGPSINFO: ");
+                while (*data == ' ') data++;
 
+                GNSS_ToOneLiner(data, gnss_info, sizeof(gnss_info));
+                Command_SetDone(gnss_info);
+            }
+        }
+        else {
+            Command_SetDone("Error: Unknown GNSS command");
+        }
+        return;
+    }
+
+
+    // PARSE default $ INPUT
     // Not command, echo message
     if (in[0] != '/'){
         Command_SetDone(in);
@@ -204,48 +391,51 @@ void Command_Handle(void){
     // ESP control
     else if (strncmp(in, "/esp", 4) == 0) {
         if (strcmp(in, "/esp rst") == 0) {
+            Modem_TogglePWK(3000);
+            DEV_Delay_ms(8000);
             ESP.restart();
         } else {
-            strcpy(out, "Error: ESP command unrecognized - Did you mean /esp rst?");
+            strcpy(out, "Error: ESP command unrecognized");
         }
     }
     // Modem external control
     else if (strncmp(in, "/sim", 4) == 0) {
         if (strncmp(in, "/sim on", 7) == 0) {  
             Modem_TogglePWK(1200);
-            strcpy(out, "Toggled pwk on modem for 1200ms");
+            strcpy(out, "Toggled pwk on modem for on");
         } else if (strncmp(in, "/sim off", 8) == 0) {  
             Modem_TogglePWK(3000);
-            strcpy(out, "Toggled pwk on modem for 3000ms");
+            strcpy(out, "Toggled pwk on modem for off");
         } else if (strncmp(in, "/sim net", 8) == 0 && modem_ready) {
             char tmp[256] = {0};
             Modem_SendAT("AT+CREG?", tmp, sizeof(tmp), 5000);
-            strcpy(out, "Checking network...");
+            strcpy(out, tmp);
         } else {
             strcpy(out, "Error: Modem command unrecognized");
         }
     }
-    // Modem sms wizard /sms <number> 
+    // Start modem sms wizard /sms <number> 
     else if (strncmp(in, "/sms", 4) == 0) {
         if (!modem_ready){
             Command_SetDone("Error: Modem is not ready");
             return;
         }
-        // Enable text mode safety
+        // Enable text mode
         char tmp[512] = {0};
-        if (!Modem_SendAT("AT+CMGF=1", tmp, sizeof(tmp), 2000)) {
+        if (!Modem_SetCheckMode(1)){
             Command_SetDone("Error: Text mode not enabled");
             return;
-        }
+        } 
         tmp[0] = '\0';
-        int m = 0;
+        int m = 0; //msgs
+        int um = 0; //unread msgs
         // Reading recivied messages
         if (strncmp(in, "/sms r", 6) == 0) {
             // All msgs on sim
             if (strncmp(in, "/sms ra", 7) == 0) {
                 Modem_SendAT ("AT+CMGL=\"ALL\"", tmp, sizeof(tmp), 5000);
                 m = CountSmsMessages(tmp);
-                snprintf(out, sizeof(out), "There are %d messages stored.", m);
+                snprintf(out, sizeof(out), "Total SMS stored on sim: %d", m);
                 if (m > 0) {
                     sms_count = m; 
                     sms_read = true; 
@@ -257,12 +447,17 @@ void Command_Handle(void){
             // Unread msgs
             else if (strncmp(in, "/sms ru", 7) == 0) {
                 Modem_SendAT ("AT+CMGL=\"REC UNREAD\"", tmp, sizeof(tmp), 5000);
-                m = CountSmsMessages(tmp);
-                snprintf(out, sizeof(out), "There are %d unread messages.", m);
-                if (m > 0) {
-                    sms_count = m; 
+                int ids[10];
+                um = GetUnreadSmsIndices(tmp, ids, 10);
+                char id_str[64] = {0};
+                SetUnreadSmsNumbers(id_str, ids, um);
+                if (um > 0) {
+                    sms_count = um; 
                     sms_read = true; 
                     sms_read_all = false;
+                    snprintf(out, sizeof(out), "Unread: %d ID(s): %s", um, id_str);
+                } else {
+                    strcpy(out , "No new SMS messages");
                 }
                 Command_SetDone(out);
                 return;
@@ -312,6 +507,15 @@ void Command_Handle(void){
             at_mode = true;
             strcpy(out, "AT mode active");
         }
+    }
+    // GNSS easy
+    else if (strcmp(in, "/gnss") == 0) {
+        if (!modem_ready) {
+            Command_SetDone("Error: Modem is not ready");
+            return;
+        }
+        gnss_mode = true;
+        strcpy(out, "GNSS mode activated use: 'on'");
     }
     
     
