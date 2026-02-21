@@ -10,19 +10,15 @@
 * Sleep/Wake button clears screen on sleep (sym+esc)
 * Home page shows time(soon) and dynamic relevant system information (basic)
 * Idle page has a VCR style box bouncing around on the edges of the screen
-* Display_1Gray_Part not working so ~500ms refreshrate is best so far
 * Command page causes keyboard to enter sequential mode for typing
 * Commands start with '/' char else echo input 
-* Command buffer is accessed atomically by display to show user text(producer/viewer)
-* Command buffer is accessed atomically for modem commands and updating responses
-* Command history is saved and can be accessed by using arrow keys
 * Command prompt corresponds to specifc mode you are currently in ($, AT, >, :)
-* Command modes include (Base $, at mode AT, sms read :, sms write >)
+* Command modes include (Base $, at mode AT, sms write >, sms read :)
 * Command modes can be exited using /exit
-* It will save state, history and text buffer unless you /clear or esc from page
+* It will save state, history and text buffer unless you /clear or esc key
 * Command screen is encapsulated and dynamic so text will wrap and push elements up until there is room
 * Queuing display events will cause a fullscreen refresh
-* WARNING the epd api from waveshare requires 4Gray to be initlizied before fullscreen changes. (It only initilizes once at start) STABLE
+* WARNING the epd api from waveshare requires 4Gray to be initlizied before fullscreen changes. (It currently only initilizes once at start) STABLE
 
 ## Commands
 ```
@@ -59,9 +55,13 @@ $ /sms ru            - Read unread messages stored on sim
 10. KeyboardTask doesnt need debounce (release = 1 stroke), and when a special key is encountered, posts events for other tasks
 11. Command takes a c-string as input and returns a response as well as posting events
 12. Command history and command buffer is held until esc or /clear
-13. WiFi is underdeveloped at the moment but can poll for nearby networks or connect to one.
-14. All of the tasks have a timeout feature that will increase time between loops to save resources
-15. Every 60 partial updates send fullscreen refresh to prevent ghosting
+13. Command buffer is accessed atomically by display to show user text(producer/viewer)
+14. Command buffer is accessed atomically for modem commands and updating responses
+15. Command history is saved and can be accessed by using arrow keys
+16. WiFi is underdeveloped at the moment but can poll for nearby networks or connect to one.
+17. All of the tasks have a timeout feature that will increase time between loops to save resources
+18. Every 60 partial updates send fullscreen refresh to prevent ghosting
+19. Display_1Gray_Part not working so ~500ms refreshrate is best so far
 
 # Tech Stack
 ## Hardware/Communication
@@ -132,3 +132,7 @@ $ /sms ru            - Read unread messages stored on sim
 │                                             │                                                                   
 └─────────────────────────────────────────────┘                                                                   
 ```
+## Coming soon
+* Fix modem network/power query on cycle
+* Sending raw data from modem
+* Add more connections from esp32 to modem or bms/psu
