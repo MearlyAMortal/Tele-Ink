@@ -1,7 +1,18 @@
 # Tele-Ink
-## A FreeRTOS based 4GLTE/WiFi IoT device that utilizes a E-Ink display for low power
+## A FreeRTOS based 4GLTE/WiFi/GPS IoT device that utilizes a E-Ink display for low power
 
 <img src="/examples/IMG_0247.JPG" alt="Alt Text" width="400" height="600">
+
+# Features
+1. Utilizes E-Ink display for low power/holding images while off
+2. USB-C Charging and 2500Mah internal battery
+3. Full Qwerty keyboard with arrow keys and sym key
+4. Full Global Roaming 4g/3g/2g/LTE/GNSS/PPP/etc
+5. WiFi is available for connection/hosting
+6. Can send/recive SMS messages and get local time and coordinate information
+7. Can send raw AT commands and see full responses using command page
+8. Idle animation similar to old VCR tape machines
+9. Full control over hardware from command page.
 
 # Usage
 * You must wait ~20 seconds for modem coldstart + system recognition for AT
@@ -38,9 +49,16 @@ $ /sms s             - Start SMS send mode to saved NUMBER
   > /exit              - Exit SMS send mode
 $ /sms ra            - Read all messages stored on sim 
 $ /sms ru            - Read unread messages stored on sim
-  : ID                 - If there are X messages to read choose idx starting at 0
+  : ID                 - Read message number ID and store number into buffer
+  : /s                 - Uses previously read messages's number and enter SMS send mode
   : /d ID              - Delete message from sim
+  : /da                - Deletes all messages from sim
   : /exit              - Exit SMS read mode
+$ /gnss              - Enter GNSS mode
+  GNSS: on             - Turn on GNSS
+  GNSS: off            - Turn off GNSS
+  GNSS: info           - Query time and location data
+  GNSS: /exit          - Exit GNSS mode
 ```
 # High level Code functionality
 1. Starting at Tele-Ink.ino
@@ -48,20 +66,21 @@ $ /sms ru            - Read unread messages stored on sim
 3. DisplayInit() Starts a new task that can read from a queue of display events
 4. DisplayTask performs updates on the screen while holding the EPD mutex
 5. ModemInit() Starts a new task and queue then attempts to connect to the module via "AT" -> TX
-6. ModemTask waits for commands in the queue and or reads incoming data 
-7. ModemSendAT takes semaphore and the original task gives back (for response safety)
-8. KeyboardInit() Starts a new task that polls for incoming data on I2C 0x5F
-9. Keyboardtask will enter sequential mode and start the cmd_buffer if the page is command page
-10. KeyboardTask doesnt need debounce (release = 1 stroke), and when a special key is encountered, posts events for other tasks
-11. Command takes a c-string as input and returns a response as well as posting events
-12. Command history and command buffer is held until esc or /clear
-13. Command buffer is accessed atomically by display to show user text(producer/viewer)
-14. Command buffer is accessed atomically for modem commands and updating responses
-15. Command history is saved and can be accessed by using arrow keys
-16. WiFi is underdeveloped at the moment but can poll for nearby networks or connect to one.
-17. All of the tasks have a timeout feature that will increase time between loops to save resources
-18. Every 60 partial updates send fullscreen refresh to prevent ghosting
-19. Display_1Gray_Part not working so ~500ms refreshrate is best so far
+6. ModemTask waits for commands in the queue and or reads incoming data
+7. ModemStatusTask checks physical status of modem using methods in background every 30s
+8. ModemSendAT takes semaphore and the original task gives back (for response safety)
+9. KeyboardInit() Starts a new task that polls for incoming data on I2C 0x5F
+10. Keyboardtask will enter sequential mode and start the cmd_buffer if the selected page is command page
+11. KeyboardTask doesnt need debounce (release = 1 stroke), and when a special key is encountered, posts events for other tasks
+12. Command takes a c-string as input and returns a response as well as posting events
+13. Command history and command buffer is held until esc or /clear
+14. Command buffer is accessed atomically by display to show user text(producer/viewer)
+15. Command buffer is accessed atomically for modem commands and updating responses
+16. Command history is saved and can be accessed by using arrow keys
+17. WiFi is underdeveloped at the moment but can poll for nearby networks or connect to one.
+18. All of the tasks have a timeout feature that will increase time between loops to save resources
+19. Every 60 partial updates send fullscreen refresh to prevent ghosting
+20. Display_1Gray_Part not working so ~500ms refreshrate is best so far
 
 # Tech Stack
 ## Hardware/Communication
