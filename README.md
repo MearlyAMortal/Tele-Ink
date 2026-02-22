@@ -5,14 +5,15 @@
 
 # Features
 1. Utilizes E-Ink display for low power/holding images while off
-2. USB-C Charging and 2500Mah internal battery
+2. USB-C Charging and 2500Mah internal battery 
 3. Full Qwerty keyboard with arrow keys and sym key
 4. Full Global Roaming 4g/3g/2g/LTE/GNSS/PPP/etc
 5. WiFi is available for connection/hosting
 6. Can send/recive SMS messages and get local time and coordinate information
-7. Can send raw AT commands and see full responses using command page
-8. Idle animation similar to old VCR tape machines
-9. Full control over hardware from command page.
+7. Hologram SIM for 20 cent texts globally +43 Country and 13 digit number
+8. Can send raw AT commands and see full responses using command page
+9. Idle animation similar to old VCR tape machines
+10. Full control over hardware from command page.
 
 # Usage
 * You must wait ~20 seconds for modem coldstart + system recognition for AT
@@ -41,7 +42,7 @@ $ /sim net           - Send AT+CREG? and handle URC auto
 $ /esp rst           - Restart ESP32
 $ /at CMD            - Send raw single line AT command
 $ /at                - Enter AT mode
-  AT_                  - Type AT command ex: H, +CNUM (AT is prepented)
+  AT_                  - Type AT command ex: +CREG?, +CNUM (AT is prepented)
   AT/exit              - Exit AT mode
 $ /sms s NUMBER      - Start SMS send mode to NUMBER
 $ /sms s             - Start SMS send mode to saved NUMBER
@@ -55,9 +56,9 @@ $ /sms ru            - Read unread messages stored on sim
   : /da                - Deletes all messages from sim
   : /exit              - Exit SMS read mode
 $ /gnss              - Enter GNSS mode
-  GNSS: on             - Turn on GNSS
+  GNSS: on             - Turn on GNSS and wait for fix
   GNSS: off            - Turn off GNSS
-  GNSS: info           - Query time and location data
+  GNSS: info           - Query time and location data UTC
   GNSS: /exit          - Exit GNSS mode
 ```
 # High level Code functionality
@@ -80,13 +81,16 @@ $ /gnss              - Enter GNSS mode
 17. WiFi is underdeveloped at the moment but can poll for nearby networks or connect to one.
 18. All of the tasks have a timeout feature that will increase time between loops to save resources
 19. Every 60 partial updates send fullscreen refresh to prevent ghosting
-20. Display_1Gray_Part not working so ~500ms refreshrate is best so far
+20. Display_1Gray_Part rotation coordinates not working so ~500ms refreshrate is best so far
 
 # Tech Stack
 ## Hardware/Communication
 * Waveshare E-Ink ESP32-WROOM-32E driver module
 * Waveshare E-Ink display black/white 3.7 inch
 * Waveshare SIM7600G-H Modem module
+* LTE antenna I-P.EX Unobstructed
+* GNSS Cirocomm I-P.EX Unobstructed
+* Hologram SIM card (not using API)
 * M5Stack CardKB v1.1
 * AmpRipper 4000 v1.0 PSU/BMS
 * AdaFruit 1sLiPo 2500mAh battery
@@ -99,9 +103,16 @@ $ /gnss              - Enter GNSS mode
 * FreeRTOS
 
 # Hardware Modifications
-* Replaced 471 SMD resistors on M5Stack keyboard with 472 (3.3v logic)
+* Replaced 471 SMD resistors on M5Stack keyboard with 472 (3.3v logic) (clk/dat)
 * Replaced SMD resistor on AmpRipper for 1A max batt charge rate
 * Switch on ESP32 Driver board 1 = A  2 = ON
+
+# Goals
+1. Fix partial update buffer rotation coordinates
+2. Add connections between BMS and ESP for battery info
+3. Add RAW data mode AT+CMGF=0 but need encoding 
+4. Add GNSS automatic time zone location from API or table rather than longitude approximation (UTC currently) EX(PST = ~UTC-8)
+5. Add PPP dial up support for remote WiFi hosting (unlikely and SLOW)
 
 # Diagram
 ```
@@ -122,7 +133,7 @@ $ /gnss              - Enter GNSS mode
                                                             │                    ┼────────────────────────────┐   
   ┌──────────────────────────────────────────┐              │                    ┼──────────────────────────┐ │   
   │               3.7" E-INK                 │              │     AMP Ripper     │                          │ │   
-  │  ┌────────────────────────────────────┐  │              │                    │                          │ │   
+  │  ┌────────────────────────────────────┐  │              │      PSU/BMS       │                          │ │   
   │  │                                    │  │              │               xx   │                          │ │   
   │  │                                    │  │              └─┬─┬────────────────┘                          │ │   
   │  │                                    │  │         ┌──────┼ │                                           │ │   
@@ -130,22 +141,22 @@ $ /gnss              - Enter GNSS mode
   │  │                                    │  │         │ ┌───┘│└┼                                           │ │   
   │  │                                    │  │         │ │    │ │                                           │ │   
   │  │                                    │  │         │ │    │ │                                           │ │   
-  │  │                                    │  │         │ │    │ │                                           │ │   
-  │  │                                    │  │        ┌┘┌┘┌───▼─▼─────────┐                                 │ │   
+  │  │ Cleared History!                   │  │         │ │    │ │                                           │ │   
+  │  │ $ _                                │  │        ┌┘┌┘┌───▼─▼─────────┐                                 │ │   
   │  └────────────────────────────────────┘  ├────────┼─┼─┤               │     GND      ┌──────────────────▼─▼──┐
   │                                          │  SPI 4 │ │ │               ┼──────────────┼                       │
   └──────────────────────────────────────────┴────────┼─┼─┼               │    17-TXD    │                       │
-                                                      └┐└┐│    ESP32      ┼──────────────┤                       │
+                                                      └┐└┐│    ESP32W     ┼──────────────┤                       │
 ┌─────────────────────────────────────────────┐        │ ││               │    16-RXD    │                       │
-│              M5Stack Keyboard               ◄────────┘ ││               ┼──────────────┤                       │
+│          M5Stack QWERTY Keyboard            ◄────────┘ ││               ┼──────────────┤                       │
 │                                             ◄──────────┘│               │    4-PWK     │                       │
 │                                             │           │               ┼──────────────┤      SIM7600G-H       │
 │                                             │           └──┬──┬─────────┘              │                       │
 │                                             │  DATA-21     │  │                        │                       │
 │                                        472  ┼──────────────┘  │                        │                       │
 │                                             │  CLK-22         │                        │                       │
-│                                        472  ┼─────────────────┘                        │                       │
-│                                             │                                          │                       │
+│                                        472  ┼─────────────────┘              LTE───────┤                       │
+│                                             │                               GNSS───────┤                       │
 │                                             │                                          └───────────────────────┘
 │                                             │                                                                   
 │                                             │                                                                   
