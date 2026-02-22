@@ -162,7 +162,15 @@ $ /gnss              - Enter GNSS mode
 │                                             │                                                                   
 └─────────────────────────────────────────────┘                                                                   
 ```
-## Coming soon
-* Fix modem network/power query on cycle
-* Sending raw data from modem
-* Add more connections from esp32 to modem or bms/psu
+## Sources
+* https://www.waveshare.com/wiki/SIM7600G-H_4G_Module?srsltid=AfmBOoow9ujjO1206nzUsXVMr9o72mcQgfmwjMp-vEK3QVuOIhEVSpLd
+* https://www.waveshare.com/wiki/E-Paper_ESP32_Driver_Board
+* https://www.waveshare.com/wiki/E-Paper_API_Analysis?srsltid=AfmBOoqeSFM_rVWAgtaWrzRiQB7OrI90iRIy5Up24zcl5dhIv23WO0H_
+* https://www.digikey.com/en/resources/conversion-calculators/conversion-calculator-ohms
+* https://www.waveshare.com/w/upload/3/39/SIM7080_Series_AT_Command_Manual_V1.02.pdf?srsltid=AfmBOopDPUJbcJVsTY_KqjYtSbKTreGlTCFfHh68Vml8m4Wp6ItrzICq
+* https://docs.m5stack.com/en/unit/cardkb_1.1
+* https://www.tindie.com/products/kickstart_design/ampripper-4000-5v-4a-lipo-li-ion-battery-charger/
+* https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/freertos.html
+* https://content.u-blox.com/sites/default/files/products/documents/GNSS-Antennas_AppNote_%28UBX-15030289%29.pdf
+* https://www.w3schools.com/c/c_ref_string.php
+
