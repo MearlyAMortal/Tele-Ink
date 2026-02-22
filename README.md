@@ -7,10 +7,10 @@
 1. Utilizes E-Ink display for low power/holding images while off
 2. USB-C Charging and 2500Mah internal battery 
 3. Full Qwerty keyboard with arrow keys and sym key
-4. Full Global Roaming 4g/3g/2g/LTE/GNSS/PPP/etc
-5. WiFi is available for connection/hosting
-6. Can send/recive SMS messages and get local time and coordinate information
-7. Hologram SIM for 20 cent texts globally +43 Country and 13 digit number
+4. Hologram SIM for automatic network switching +43 Country code and 13 digit number
+5. Full Global Roaming 4g/3g/2g/LTE/GNSS/PPP/etc (no voice)
+6. WiFi is available for connection/hosting
+7. Can send/recive SMS messages and get local time and coordinate information
 8. Can send raw AT commands and see full responses using command page
 9. Idle animation similar to old VCR tape machines
 10. Full control over hardware from command page.
@@ -79,7 +79,7 @@ $ /gnss              - Enter GNSS mode
 15. Command buffer is accessed atomically for modem commands and updating responses
 16. Command history is saved and can be accessed by using arrow keys
 17. WiFi is underdeveloped at the moment but can poll for nearby networks or connect to one.
-18. All of the tasks have a timeout feature that will increase time between loops to save resources
+18. All of the heavy tasks have a timeout feature that will increase time between loops to save resources
 19. Every 60 partial updates send fullscreen refresh to prevent ghosting
 20. Display_1Gray_Part rotation coordinates not working so ~500ms refreshrate is best so far
 
