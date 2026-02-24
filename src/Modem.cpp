@@ -2,6 +2,7 @@
 #include "Arduino.h"
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 #include "Display.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -18,6 +19,7 @@ static uint8_t modem_tx_pin = -1;
 static SemaphoreHandle_t modem_mutex = NULL;
 static TaskHandle_t modem_task_handle = NULL;
 static TaskHandle_t modem_status_task_handle = NULL;
+static TaskHandle_t modem_gnss_task_handle = NULL;
 static QueueHandle_t modem_cmd_queue = NULL;
 static ModemCmd *current_cmd = NULL;
 
@@ -37,6 +39,16 @@ static bool Modem_HandleURC(const char *line);
 static void modemTask(void *pv);
 
 
+// Removes anything not ASCII and makes it a space
+void ReplaceControlChars(char* s) {
+    if (!s) return;
+    for (char *c = s; *c; c++) {
+        if (*c < 0x20 || *c >= 0x7F) {
+            *c = ' ';
+        }
+    }
+}
+
 void Modem_TogglePWK(uint32_t duration_ms) {
     if (modemPowerPin == -1) {
         printf("Modem: No power pin provided.\r\n");
@@ -49,14 +61,16 @@ void Modem_TogglePWK(uint32_t duration_ms) {
 }
 
 void Modem_Restart(void) {
+    if (!modem_ready) {
+        printf("Modem_Restart: Modem not ready, cannot restart.\r\n");
+        return;
+    }
     printf("Restarting modem...\r\n");
-    modem_ready = false;
     Modem_TogglePWK(2200);
     DEV_Delay_ms(25000);
     Modem_TogglePWK(1100);
     DEV_Delay_ms(20000);
-    printf("Modem ready to begin serial.\r\n");
-    modem_ready = true;
+    printf("Modem restarted.\r\n");
 }
 
 static bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeout_ms) {
@@ -235,21 +249,13 @@ bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeout
 
 
 static bool Modem_HandleURC(const char *line) {
-    if (strcmp(line, "+CREG: 0,5") == 0 || strcmp(line, "+CREG: 0,1") == 0) {
-        printf("Modem network connected!\r\n");
-        DisplayEvent e = { .type = DISP_EVT_MODEM_NET, .payload = NULL};
-        Display_PostEvent(&e, 0);
-        DEV_Delay_ms(250); // Wait for display task to process event and update modem_net before we return
-        return true;
-    } 
-    else if (strncmp(line, "+CMTI:", 6) == 0) {
+    if (strncmp(line, "+CMTI:", 6) == 0) {
         printf("SMS recieved! Index: %s\r\n", line + 12);
         DisplayEvent e = { .type = DISP_EVT_SMS_RECEIVED, .payload = NULL};
         Display_PostEvent(&e, 0);
         DEV_Delay_ms(250);
         return true;
-    }
-    else {
+    } else {
         printf("Modem URC unhandled: %s\r\n", line);
     }
     return false;
@@ -259,7 +265,7 @@ static bool Modem_HandleURC(const char *line) {
 bool Modem_CheckStatus(void) {
     // modemTask must have been deinitialized or serial = nullptr or something catostrophic happened if modemSerial is null at this point
     if (!modemSerial && modem_serial_begun) {
-        // NEED TO UPDATE SERIAL
+        modem_serial_begun = false;
         DisplayEvent e = { .type = DISP_EVT_MODEM_LOST, .payload = NULL};
         Display_PostEvent(&e, 0);
         DEV_Delay_ms(250);
@@ -267,7 +273,7 @@ bool Modem_CheckStatus(void) {
     }
     // Take mutex for entire check to prevent modemTask from doing too much fr tho
     // Give before each return but after the delay to ensure display task has time to process event and update modem state before we potentially check again or do something else with the modem
-    if (modem_mutex && xSemaphoreTake(modem_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+    if (modem_mutex && xSemaphoreTake(modem_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
         printf("Modem_CheckStatus: failed to take modem_mutex (timeout)\r\n");
         return false;
     }
@@ -278,12 +284,13 @@ bool Modem_CheckStatus(void) {
         DEV_Delay_ms(100);
         modem_serial_begun = true;
     }
-    // Send AT to check if modem is ready
+    // Send AT manually to check if modem is ready
     modemSerial->print("AT\r\n");
     unsigned long start = millis();
     char resp[64] = {0};
     int idx = 0;
-
+    bool at = false;
+    bool creg = false;
     // Read response with timeout
     while (millis() - start < 1000 && idx < sizeof(resp) - 1) {
         if (modemSerial->available()) {
@@ -291,83 +298,208 @@ bool Modem_CheckStatus(void) {
             resp[idx++] = c;
             resp[idx] = '\0';
             if (strstr(resp, "OK")) {
+                at = true;
                 break;
             }
         }
     }
-    // No response dont continue
-    if (strstr(resp, "OK") == NULL) {
+    // No response modem lost dont continue
+    if (!at) {
+        xSemaphoreGive(modem_mutex);
         // Did we lose the modem or is it just not ready?
         if (modem_ready || modem_net) {
             DisplayEvent e = { .type = DISP_EVT_MODEM_LOST, .payload = NULL};
             Display_PostEvent(&e, 0);
             DEV_Delay_ms(250);
-            xSemaphoreGive(modem_mutex);
             return true;
-        } else {
-            xSemaphoreGive(modem_mutex);
-            return false;
-        }
+        } 
+        return false;
     }
     // At least ready at this point
-    // Manually check registration status to prevent handleURC from being the only way to set modem_net
-    resp[0] = '\0';
-    DEV_Delay_ms(100);
-    modemSerial->print("AT+CREG?\r\n");
-    DEV_Delay_ms(100);
-    start = millis();
-    idx = 0;
-    while (millis() - start < 1000 && idx < sizeof(resp) - 1) {
-        if (modemSerial->available()) {
-            char c = modemSerial->read();
-            resp[idx++] = c;
-            resp[idx] = '\0';
-            if (strstr(resp, "0,5") || strstr(resp, "0,1")) {
-                if (!modem_net) {
-                    DisplayEvent e = { .type = DISP_EVT_MODEM_NET, .payload = NULL};
-                    Display_PostEvent(&e, 0);
-                    DEV_Delay_ms(250);
-                    xSemaphoreGive(modem_mutex);
-                    return true;
+    // Manually check registration status if not marked as lost or init (AT is sufficient to keep modem_net true).
+    if (!modem_net) {
+        resp[0] = '\0';
+        modemSerial->print("AT+CREG?\r\n");
+        start = millis();
+        idx = 0;
+        while (millis() - start < 1000 && idx < sizeof(resp) - 1) {
+            if (modemSerial->available()) {
+                char c = modemSerial->read();
+                resp[idx++] = c;
+                resp[idx] = '\0';
+                if (strstr(resp, "0,5") || strstr(resp, "0,1")) {
+                    creg = true;
+                    break;
                 }
             }
         }
-    }
-    // Not registered = no network
-    if (strstr(resp, "0,5") == NULL && strstr(resp, "0,1") == NULL) {
-        if (modem_net) {
-            DisplayEvent e = { .type = DISP_EVT_MODEM_LOST, .payload = NULL};
+        // Registered to home or roaming network
+        if (creg) {
+            xSemaphoreGive(modem_mutex);
+            DisplayEvent e = { .type = DISP_EVT_MODEM_NET, .payload = NULL};
             Display_PostEvent(&e, 0);
             DEV_Delay_ms(250);
-            xSemaphoreGive(modem_mutex);
             return true;
-        } 
-        if (!modem_ready) {
+        }
+        // Not registered to network, but modem is ready at least
+        else if (!modem_ready && at){
+            xSemaphoreGive(modem_mutex);
             DisplayEvent e = { .type = DISP_EVT_MODEM_READY, .payload = NULL};
             Display_PostEvent(&e, 0);
             DEV_Delay_ms(250);
-            xSemaphoreGive(modem_mutex);
             return true;
         }
+
     }
     xSemaphoreGive(modem_mutex);
     return false;
+}
+
+// Converts NMEA-style latitude/longitude to decimal degrees
+static double nmea_to_decimal(const char *val, char dir) {
+    double deg, min;
+    int deg_width = (dir == 'N' || dir == 'S') ? 2 : 3;
+    char deg_str[4] = {0};
+    strncpy(deg_str, val, deg_width);
+    deg = atof(deg_str);
+    min = atof(val + deg_width);
+    double dec = deg + min / 60.0;
+    if (dir == 'S' || dir == 'W') dec = -dec;
+    return dec;
+}
+
+// Check for 7 commas in a row (8 empty fields)
+bool is_empty_gnss(const char *input) {
+    while (*input == ' ' || *input == '\t') input++;
+    int comma_count = 0;
+    for (const char *p = input; *p; ++p) {
+        if (*p == ',') comma_count++;
+        else if (*p != '\r' && *p != '\n' && *p != ' ' && *p != '\t') return false;
+    }
+    return comma_count >= 7;
+}
+
+
+// Converts GNSS AT output to a one-line summary, takes mutex internally, updates global gnss_data, sends display event if we on home page for update
+void GNSS_ToOneLinerAndUpdate(const char *input, char *output, size_t out_size) {
+    char lat[16], ns, lon[16], ew, date[8], time[10], alt[8], spd[8];
+    // Parse the fields
+    int n = sscanf(input, "%15[^,],%c,%15[^,],%c,%6[^,],%9[^,],%7[^,],%7[^,]",
+        lat, &ns, lon, &ew, date, time, alt, spd);
+    if (is_empty_gnss(input) || n < 8) {
+        snprintf(output, out_size, "Error: Failed to fix or parse");
+        return;
+    }
+    double lat_dd = nmea_to_decimal(lat, ns);
+    double lon_dd = nmea_to_decimal(lon, ew);
+    // Convert two-character strings into integers for day, month, year, hour, min, sec
+    int year = 2000 + ((date[4] - '0') * 10 + (date[5] - '0'));
+    int month = ((date[2] - '0') * 10 + (date[3] - '0')) - 1; // tm_mon is 0-based
+    int day = ((date[0] - '0') * 10 + (date[1] - '0'));
+    int hour = ((time[0] - '0') * 10 + (time[1] - '0'));
+    int min = ((time[2] - '0') * 10 + (time[3] - '0'));
+    int sec = ((time[4] - '0') * 10 + (time[5] - '0'));
+    // Format local time struct
+    struct tm tm_struct = {0};
+    tm_struct.tm_year = year - 1900; // tm_year start 1900
+    tm_struct.tm_mon = month;
+    tm_struct.tm_mday = day;
+    tm_struct.tm_hour = hour;
+    tm_struct.tm_min = min;
+    tm_struct.tm_sec = sec;
+    // Calculate extimated UTC offset using longitude (15 degrees per hour)
+    int offset = (int)(lon_dd / 15);
+    tm_struct.tm_hour += offset;
+    // Normalize time struct (handles day/month/year rollover)
+    time_t t = mktime(&tm_struct);
+    // Set strings for output and global state 
+    char local_date_fmt[16], local_time_fmt[16];
+    strftime(local_date_fmt, sizeof(local_date_fmt), "%Y-%m-%d", localtime(&t));
+    strftime(local_time_fmt, sizeof(local_time_fmt), "%H:%M:%S", localtime(&t));
+    // Grab UTC from original input
+    char date_fmt[16], time_fmt[16];
+    snprintf(date_fmt, sizeof(date_fmt), "20%c%c-%c%c-%c%c", date[4], date[5], date[2], date[3], date[0], date[1]);
+    snprintf(time_fmt, sizeof(time_fmt), "%c%c:%c%c:%c%c", time[0], time[1], time[2], time[3], time[4], time[5]);
+
+    // Output one-liner UTC, local time is global (keep exact UTC for cmd mode)
+    snprintf(output, out_size, "La: %.6f Lo: %.6f UTC: %s Date: %s Alt: %sm Spd: %skn", lat_dd, lon_dd, time_fmt, date_fmt, alt, spd);
+    if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+        gnss_data.latitude = lat_dd;
+        gnss_data.longitude = lon_dd;
+        strncpy(gnss_data.time, local_time_fmt, sizeof(gnss_data.time)-1);
+        gnss_data.time[sizeof(gnss_data.time)-1] = '\0';
+        strncpy(gnss_data.date, local_date_fmt, sizeof(gnss_data.date)-1);
+        gnss_data.date[sizeof(gnss_data.date)-1] = '\0';
+        strncpy(gnss_data.altitude, alt, sizeof(gnss_data.altitude)-1);
+        gnss_data.altitude[sizeof(gnss_data.altitude)-1] = '\0';
+        strncpy(gnss_data.speed, spd, sizeof(gnss_data.speed)-1);
+        gnss_data.speed[sizeof(gnss_data.speed)-1] = '\0';
+        xSemaphoreGive(gnss_data.mutex);
+    } else {
+        printf("GNSS_ToOneLinerAndUpdate: failed to take gnss_data mutex\r\n");
+    }
+    // Update full screen if in home screen and on since that is the only screen that shows gnss data for now
+    // Non partial update becuase homescreen is now static with dynamic updates not interpolating
+    if (screen_on && current_page == PAGE_HOME) {
+        DisplayEvent e = { .type = DISP_EVT_WAKE, .payload = NULL};
+        Display_PostEvent(&e, 0);
+        DEV_Delay_ms(250);
+    }
+    
+}
+
+static void ModemGNSSPollTask(void *pv) {
+    (void)pv;
+    char gnss_resp[128] = {0};
+    bool on = false;
+    for (;;) {
+        if (!modem_ready) {
+            DEV_Delay_ms(30000);
+            continue;
+        }
+        if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+            on = gnss_data.gnss_on;
+            xSemaphoreGive(gnss_data.mutex);
+        }
+        if (on && modem_ready) {
+            if (Modem_SendAT("AT+CGPSINFO", gnss_resp, sizeof(gnss_resp), 2000)) {
+                ReplaceControlChars(gnss_resp);
+                char *data = gnss_resp + strlen("AT+CGPSINFO +CGPSINFO: ");
+                while (*data == ' ') data++;
+                GNSS_ToOneLinerAndUpdate(data, gnss_resp, sizeof(gnss_resp));
+            }
+            
+        }
+        // Offset delay
+        // Needs to be its own painting for gnss if i want to update faster
+        if (on && gnss_mode && current_page == PAGE_HOME) {
+            DEV_Delay_ms(15000);
+        } else {
+            DEV_Delay_ms(45000);
+        }
+    }
+}
+
+static void Modem_StartGNSSPollTask(void) {
+    if (!modem_gnss_task_handle) {
+        xTaskCreatePinnedToCore(ModemGNSSPollTask, "modemGNSS", 4096, NULL, 4, &modem_gnss_task_handle, 1);
+    }
 }
 
 // Modem background task to handle the modems physical state
 static void ModemStatusTask(void *pv) {
     (void)pv;
     for (;;) {
-        if (Modem_CheckStatus()) {
-            printf("Modem status changed!\r\n");
-        }
-        DEV_Delay_ms(30000);
+        if (Modem_CheckStatus()) printf("Modem status changed!\r\n");
+        DEV_Delay_ms(10000); // 10s
     }
 }
 
 static void Modem_StartStatusTask(void) {
     // Less prioriety than main task
-    xTaskCreatePinnedToCore(ModemStatusTask, "modemStatus", 4096, NULL, 3, &modem_status_task_handle, 1);
+    if (!modem_status_task_handle) {
+        xTaskCreatePinnedToCore(ModemStatusTask, "modemStatus", 4096, NULL, 3, &modem_status_task_handle, 1);
+    }
 }
 
 // Modem background task to handle command queue and URCs
@@ -383,7 +515,8 @@ static void modemTask(void *pv) {
 
     // Create status check task
     Modem_StartStatusTask();
-
+    DEV_Delay_ms(5000);
+    Modem_StartGNSSPollTask();
     // Init complete, enter main loop to handle commands and URCs
     for (;;) {
         // if modem not ready, check current status
@@ -403,7 +536,7 @@ static void modemTask(void *pv) {
                 idx = 0;
                 // send the command
                 if (!current_cmd->noTx){
-                    if (modem_mutex && xSemaphoreTake(modem_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                    if (modem_mutex && xSemaphoreTake(modem_mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
                         modemSerial->print(current_cmd->cmd);
                         modemSerial->print("\r\n");
                         modemSerial->flush();
@@ -419,50 +552,54 @@ static void modemTask(void *pv) {
         }
 
         // 2) Read available bytes and accumulate lines
-        while (modemSerial->available()) {
-            int c = modemSerial->read();
-            if (c < 0) break;
-            // If we're waiting for OK and we see '>', send ready AT+CMGS
-            if (current_cmd && current_cmd->waitForOK && c == '>') {
-                // Only treat as SMS prompt if the command sms
-                if (strncmp(current_cmd->cmd, "AT+CMGS", 7) == 0) {
-                    strncat(current_cmd->resp, ">\n", sizeof(current_cmd->resp) - strlen(current_cmd->resp) - 1);
-                    xSemaphoreGive(current_cmd->done_sem);
-                    current_cmd = NULL;
-                    idx = 0;
-                    continue;
+        if (modem_mutex && xSemaphoreTake(modem_mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+            while (modemSerial->available()) {
+                int c = modemSerial->read();
+                if (c < 0) break;
+                // If we're waiting for OK and we see '>', send ready AT+CMGS
+                if (current_cmd && current_cmd->waitForOK && c == '>') {
+                    // Only treat as SMS prompt if the command sms
+                    if (strncmp(current_cmd->cmd, "AT+CMGS", 7) == 0) {
+                        strncat(current_cmd->resp, ">\n", sizeof(current_cmd->resp) - strlen(current_cmd->resp) - 1);
+                        xSemaphoreGive(current_cmd->done_sem);
+                        xSemaphoreGive(modem_mutex);
+                        current_cmd = NULL;
+                        idx = 0;
+                        continue;
+                    }
                 }
-            }
-            if (idx < sizeof(line) - 1) line[idx++] = (char)c;
-            if (c == '\n') {
-                // strip CR/LF
-                while (idx > 0 && (line[idx-1] == '\r' || line[idx-1] == '\n')) idx--;
-                line[idx] = '\0';
-                // DEBUG
-                if (line[0] != '\0') printf("Modem RX: %s\r\n", line);
-                if (idx > 0) {
-                    if (current_cmd) {
-                        // append to response transcript
-                        strncat(current_cmd->resp, line, sizeof(current_cmd->resp) - strlen(current_cmd->resp) - 2);
-                        strncat(current_cmd->resp, "\n", sizeof(current_cmd->resp) - strlen(current_cmd->resp) - 1);
-                        if (current_cmd->waitForOK) {
-                            if (strcmp(line, "OK") == 0 || strcmp(line, "ERROR") == 0 ||
-                                strstr(line, "+CME ERROR") || strstr(line, "+CMS ERROR")) {
+                if (idx < sizeof(line) - 1) line[idx++] = (char)c;
+                if (c == '\n') {
+                    // strip CR/LF
+                    while (idx > 0 && (line[idx-1] == '\r' || line[idx-1] == '\n')) idx--;
+                    line[idx] = '\0';
+                    // DEBUG
+                    if (line[0] != '\0') printf("Modem RX: %s\r\n", line);
+                    if (idx > 0) {
+                        if (current_cmd) {
+                            // append to response transcript
+                            strncat(current_cmd->resp, line, sizeof(current_cmd->resp) - strlen(current_cmd->resp) - 2);
+                            strncat(current_cmd->resp, "\n", sizeof(current_cmd->resp) - strlen(current_cmd->resp) - 1);
+                            if (current_cmd->waitForOK) {
+                                if (strcmp(line, "OK") == 0 || strcmp(line, "ERROR") == 0 ||
+                                    strstr(line, "+CME ERROR") || strstr(line, "+CMS ERROR")) {
+                                    xSemaphoreGive(current_cmd->done_sem);
+                                    current_cmd = NULL;
+                                }
+                            } else {
                                 xSemaphoreGive(current_cmd->done_sem);
                                 current_cmd = NULL;
                             }
                         } else {
-                            xSemaphoreGive(current_cmd->done_sem);
-                            current_cmd = NULL;
+                            // unsolicited result code / URC
+                            Modem_HandleURC(line);
                         }
-                    } else {
-                        // unsolicited result code / URC
-                        Modem_HandleURC(line);
                     }
-                }
 
-                idx = 0;
+                    idx = 0;
+                }
             }
+            xSemaphoreGive(modem_mutex);
         }
         // check for command timeout
         if (current_cmd) {
@@ -501,12 +638,12 @@ bool Modem_Init(HardwareSerial *serial, int rxPin, int txPin, int powerPin) {
         digitalWrite(modemPowerPin, LOW);
     }
 
-    // Safety
+    // Mutex for modem uart access and state
     if (!modem_mutex) modem_mutex = xSemaphoreCreateMutex();
-    //if (!modem_resp_sem) modem_resp_sem = xSemaphoreCreateBinary();
+    // Mutex for gnss data access
+    if (!gnss_data.mutex) gnss_data.mutex = xSemaphoreCreateMutex();
     // Queue
     if (!modem_cmd_queue) modem_cmd_queue = xQueueCreate(4, sizeof(ModemCmd*));
-
     if (modemSerial) Modem_StartTask();
     
     return true;

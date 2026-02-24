@@ -90,8 +90,6 @@ static void keyTask(void *pv) {
     (void)pv;
     uint8_t keycode = 0;
     uint8_t last = 0;
-    uint32_t timeout_count = 0;
-    bool timeout = false;
     // Buffer for sequential mode building strings to send to command processor
     bool sequential_mode = false;
     static char line_buffer[CMD_BUFFER_SIZE];
@@ -105,16 +103,15 @@ static void keyTask(void *pv) {
 
         keycode = 0;
 
-        // Read Keyboard data, false if 0x00 (no key)
+        // Read Keyboard data, false if 0x00 (no key) IDLE
         if (!i2c_read_key(keycode) ) {
-            // Idle timeout handling
             DEV_Delay_ms(POLL_MS);
             continue;
         }
 
         // Key pressed
-        timeout_count = 0;
-        timeout = false;
+        SetLastActivityTick(); // Reset idle timer for display on any key press
+
         // Handle special key if mapped (exit sequential and return to base handling)
         if (keycode >= 0x80 && keycode <= 0xAF) {
             last = keycode;
@@ -130,7 +127,8 @@ static void keyTask(void *pv) {
         sequential_mode = (current_page == PAGE_COMMAND);
 
         if (sequential_mode) { 
-            if (keycode == 0x1B) { // Esc
+            if (keycode == 0x1B) { // Esc (repurposing in progress)
+                /*
                 line_pos = 0;
                 line_buffer[0] = '\0';
                 sequential_mode = false;
@@ -142,6 +140,7 @@ static void keyTask(void *pv) {
                 last = keycode;
                 Display_ClearCommandHistory();
                 Display_Event_ShowHome(); // Default to home
+                */
                 continue;
             } 
             if (keycode == 0x08 || keycode == 0x7F) { // Backspace/Delete

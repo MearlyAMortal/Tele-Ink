@@ -19,7 +19,6 @@ bool screen_on = false;
 PageType current_page = PAGE_NONE;
 PageType last_page = PAGE_NONE;
 PageType boot_page = PAGE_BOOT;
-CommandBuffer cmd_buffer = {0};
 bool modem_ready = false;
 bool modem_net = false;
 bool modem_powered = false;
@@ -29,7 +28,8 @@ bool sms_read = false;
 int sms_count = 0;
 bool at_mode = false;
 bool gnss_mode = false;
-bool gnss_on = false;
+CommandBuffer cmd_buffer = {0};
+GNSSData gnss_data = {0};
 // Private
 // Screen
 static UBYTE *reusable_buf = NULL;
@@ -79,6 +79,10 @@ static void Display_Sleep(bool clear_screen);
 static void Display_Wake(void);
 static void Display_UpdateFullScreen(void);
 
+void SetLastActivityTick(void) {
+    last_activity_tick = xTaskGetTickCount();
+    idle_timeout_count = 0; // Reset idle timeout count on activity
+}
 
 // Paint functions for dynamic display modes
 static UWORD getImageSizeForMode(uint8_t gray) {
@@ -126,43 +130,121 @@ static void paintHomeScreen(void) {
     Paint_Clear(WHITE);
     // title
     Paint_DrawString_EN(10, 5, "Tele-Ink", &Font24, WHITE, BLACK);
-    Paint_DrawString_EN(160, 10, "Version 0.2.1", &Font12, WHITE, BLACK);
+    Paint_DrawString_EN(160, 10, "Version 0.2.4", &Font12, WHITE, BLACK);
+    // Seperator line
+    Paint_DrawLine(5, 30, Font24.Width * 16, 30, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
+
+    // Horizontal split
+    Paint_DrawLine((display_w/2) + 40, 1, (display_w/2) + 40, (display_h/2) + 40, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
+    // bottom split
+    Paint_DrawLine(1, (display_h/2) + 40, display_w-1, (display_h/2) + 40, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
+
+
+    // Modem text mode
+    char buf[64] = {0};
+    if (at_mode) {
+        snprintf(buf, sizeof(buf), "CMD Mode: AT", at_mode);
+    }
+    else if (sms_read || sms_count) {
+        snprintf(buf, sizeof(buf), "CMD Mode: SMS", at_mode);
+    }
+    else if (gnss_mode) {
+        snprintf(buf, sizeof(buf), "CMD Mode: GNSS", at_mode);
+    }
+    else {
+        snprintf(buf, sizeof(buf), "CMD Mode: Base", at_mode);
+    }
+    Paint_DrawString_EN(10, 40, buf, &Font16, BLACK, WHITE);
+
     //  status
     if (modem_powered && modem_ready){
-        Paint_DrawString_EN(10, 40, "Modem +", &Font16, BLACK, WHITE);
+        Paint_DrawString_EN(10, 60, "Modem +", &Font16, BLACK, WHITE);
         if (modem_net) {
-            Paint_DrawString_EN(10, 40, "Modem ++", &Font16, BLACK, WHITE);
+            Paint_DrawString_EN(10, 60, "Network +", &Font16, BLACK, WHITE);
         } 
     } else {
-        Paint_DrawString_EN(10, 40, "Modem -", &Font16, BLACK, WHITE);
+        Paint_DrawString_EN(10, 60, "Modem -", &Font16, BLACK, WHITE);
     }
 
     // GNSS
-    if (gnss_on) {
-        Paint_DrawString_EN(10, 60, "GNSS +", &Font16, BLACK, WHITE);
+    if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+        if (gnss_data.gnss_on) {
+            Paint_DrawString_EN(10, 80, "GNSS +", &Font16, BLACK, WHITE);
+        } else {
+            Paint_DrawString_EN(10, 80, "GNSS -", &Font16, BLACK, WHITE);
+        }
+        xSemaphoreGive(gnss_data.mutex);
     } else {
-        Paint_DrawString_EN(10, 60, "GNSS -", &Font16, BLACK, WHITE);
+        Paint_DrawString_EN(10, 80, "GNSS ?", &Font16, BLACK, WHITE);
     }
-
+    
     // SMS (temporary)
     if (sms_count > 0 && !sms_read) {
         char buf[32];
         snprintf(buf, sizeof(buf), "SMS New: %d", sms_count);
-        Paint_DrawString_EN(10, 80, buf, &Font16, BLACK, WHITE);
+        Paint_DrawString_EN(10, 100, buf, &Font16, BLACK, WHITE);
     } else {
-        Paint_DrawString_EN(10, 80, "SMS: 0", &Font16, BLACK, WHITE);
+        Paint_DrawString_EN(10, 100, "SMS: 0", &Font16, BLACK, WHITE);
     }
-    
+
     // WIFI
     if (wifi_on){
-        Paint_DrawString_EN(10, 100, "Wifi +", &Font16, BLACK, WHITE);
+        Paint_DrawString_EN(10, 120, "Wifi +", &Font16, BLACK, WHITE);
         if (wifi_connected){
-            Paint_DrawString_EN(10, 100, "Wifi ++", &Font16, BLACK, WHITE);
+            Paint_DrawString_EN(10, 120, "Wifi ++", &Font16, BLACK, WHITE);
         }
     } else {
-        Paint_DrawString_EN(10, 100, "Wifi -", &Font16, BLACK, WHITE);
+        Paint_DrawString_EN(10, 120, "Wifi -", &Font16, BLACK, WHITE);
     }
-     
+
+    // GNSS data
+    if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+        // 
+        if (gnss_data.time[0] == '\0') {
+            Paint_DrawString_EN(display_w - 10 - (Font16.Width * strlen("GNSS Unavailable")), 10, "GNSS Unavailable", &Font16, BLACK, WHITE);
+            xSemaphoreGive(gnss_data.mutex);
+            return;
+        }
+        char result[64];
+        double lon = gnss_data.longitude;
+        // rouch longitute math for calculating local time from utc for display, not accounting for daylight savings or anything, just rough
+        int local_time_offset = (int)(lon / 15); // 15 degrees of longitude per hour
+        snprintf(result, sizeof(result), "Local Time UTC%+d", local_time_offset);
+        Paint_DrawString_EN(display_w - 10 - (Font16.Width * strlen(result)), 10, result, &Font16, BLACK, WHITE);
+        // Draw sun or moon based on rough local time, not accounting for date or anything, just rough
+        int local_hour = 0;
+        if (sscanf(gnss_data.time, "%2d", &local_hour) == 1) {
+            local_hour = (local_hour + 24) % 24; // wrap around 24 hours
+            if (local_hour >= 6 && local_hour < 18) {
+                // Daytime: draw sun
+                Paint_DrawCircle((display_w/2) + 70, (display_h/2)+1, 20, BLACK, DOT_PIXEL_1X1, DRAW_FILL_EMPTY);
+            } else {
+                // Nighttime: draw moon
+                Paint_DrawCircle((display_w/2) + 70, (display_h/2)+1, 20, BLACK, DOT_PIXEL_1X1, DRAW_FILL_FULL);
+                Paint_DrawCircle((display_w/2) + 65, (display_h/2)+1, 20, WHITE, DOT_PIXEL_1X1, DRAW_FILL_FULL);
+            }
+        }
+
+        memset(result, 0, sizeof(result));
+        snprintf(result, sizeof(result), "Time: %s", gnss_data.time);
+        Paint_DrawString_EN(display_w - 10 - (Font12.Width * strlen(result)), 30, result, &Font12, WHITE, BLACK);
+        memset(result, 0, sizeof(result));
+        snprintf(result, sizeof(result), "Date: %s", gnss_data.date);
+        Paint_DrawString_EN(display_w - 10 - (Font12.Width * strlen(result)), 50, result, &Font12, WHITE, BLACK);
+        memset(result, 0, sizeof(result));
+        snprintf(result, sizeof(result), "Latitude: %.6f", gnss_data.latitude);
+        Paint_DrawString_EN(display_w - 10 - (Font12.Width * strlen(result)), 70, result, &Font12, WHITE, BLACK);
+        memset(result, 0, sizeof(result));
+        snprintf(result, sizeof(result), "Longitude: %.6f", gnss_data.longitude);
+        Paint_DrawString_EN(display_w - 10 - (Font12.Width * strlen(result)), 90, result, &Font12, WHITE, BLACK);
+        memset(result, 0, sizeof(result));
+        snprintf(result, sizeof(result), "Altitude M: %s", gnss_data.altitude);
+        Paint_DrawString_EN(display_w - 10 - (Font12.Width * strlen(result)), 110, result, &Font12, WHITE, BLACK);
+        memset(result, 0, sizeof(result));
+        snprintf(result, sizeof(result), "Speed KN: %s", gnss_data.speed);
+        Paint_DrawString_EN(display_w - 10 - (Font12.Width * strlen(result)), 130, result, &Font12, WHITE, BLACK);
+        xSemaphoreGive(gnss_data.mutex);
+    }
 }
 static void paintCommandScreen(void) {
     paintConfigureForMode(4);
@@ -187,8 +269,8 @@ static void paintBootScreen(void) {
     Paint_DrawCircle(105, 95, 20, WHITE, DOT_PIXEL_1X1, DRAW_FILL_FULL);
     Paint_DrawLine(85, 95, 125, 95, BLACK, DOT_PIXEL_1X1, LINE_STYLE_DOTTED);
     Paint_DrawLine(105, 75, 105, 115, BLACK, DOT_PIXEL_1X1, LINE_STYLE_DOTTED);
-    Paint_DrawString_EN(10, 5, "Logan P", &Font16, BLACK, WHITE);
-    Paint_DrawString_EN(10, 20, "NoobPhone v0.2.1", &Font12, WHITE, BLACK);
+    Paint_DrawString_EN(10, 5, "Tele-Ink v0.2.4", &Font16, BLACK, WHITE);
+    Paint_DrawString_EN(10, 20, "By: Logan Puntous", &Font12, WHITE, BLACK);
     Paint_DrawNum(10, 33, 123456789, &Font12, BLACK, WHITE);
     Paint_DrawNum(10, 50, 987654321, &Font16, WHITE, BLACK);
     Paint_DrawString_EN(10, 150, "You can change modes w/ sym", &Font24, BLACK, GRAY1);
@@ -218,8 +300,10 @@ static void Display_Wake(void) {
     } else {
         // Init 4Gray
         //printf("Initializing 4Gray mode not\r\n");
+        printf("Initializing 1Gray mode wake supposed to be 4\r\n");
+        EPD_3IN7_1Gray_Init();
         //EPD_3IN7_4Gray_Init(); 
-        //DEV_Delay_ms(100);
+        DEV_Delay_ms(10);
     }
 
     screen_on = true;
@@ -310,7 +394,7 @@ static void Display_HandleScreenChange(void) {
     EPD_3IN7_4Gray_Display(image_buf4);
     
     // Start partial updates if needed
-    if (current_page == PAGE_HOME || current_page == PAGE_IDLE || current_page == PAGE_COMMAND) {
+    if (current_page == PAGE_IDLE || current_page == PAGE_COMMAND) {
         // Switch to 1 gray for partial updates
         printf("Initializing 1Gray mode HSC\r\n");
         EPD_3IN7_1Gray_Init();
@@ -468,26 +552,26 @@ static void HandlePartialUpdate_idle(void) {
     if (rx <= 0) { // Left
         rx = 0;
         vx = -vx;
-        vx += (int)(rand() % 8) - 4;
+        vx += (int)(rand() % 3) - 1;
         idle_c[0] = ((idle_c[0]+1) - 'A') % 26 + 'A';
     } else if (rx + rw > display_w - 1) { // Right
         rx = (display_w - 1) - (rw - 1);
         if (rx < 0) rx = 0;
         vx = -vx;
-        vx += (int)(rand() % 8) - 4;
+        vx += (int)(rand() % 3) - 1;
         idle_c[0] = ((idle_c[0]+1) - 'A') % 26 + 'A';
     }
     // bounce on vertical edges
     if (ry <= 0) { // Top
         ry = 0;
         vy = -vy;
-        vy += (int)(rand() % 8) - 4;
+        vx += (int)(rand() % 3) - 1;
         idle_c[0] = ((idle_c[0]+1) - 'A') % 26 + 'A';
     } else if (ry + rh - 1 > display_h - 1) { // Bottom
         ry = (display_h - 1) - (rh - 1);
         if (ry < 0) ry = 0;
         vy = -vy;
-        vy += (int)(rand() % 8) - 4;
+        vx += (int)(rand() % 3) - 1;
         idle_c[0] = ((idle_c[0]+1) - 'A') % 26 + 'A';
     }
 
@@ -558,6 +642,8 @@ static void HandlePartialUpdate_idle(void) {
     prev_rx = rx;
     prev_ry = ry;
 }
+
+
 // Handle partial updates for current page (drawing and displaying)
 static void Display_HandlePartialUpdate(void) {
     paintConfigureForMode(1);
@@ -565,9 +651,6 @@ static void Display_HandlePartialUpdate(void) {
 
     if (current_page == PAGE_COMMAND) {
         HandlePartialUpdate_command();
-    }
-    else if (current_page == PAGE_HOME) {
-        EPD_3IN7_1Gray_Display(image_buf1);
     }
     else if (current_page == PAGE_IDLE) {
         HandlePartialUpdate_idle();
@@ -620,7 +703,15 @@ static void displayTask(void *pv) {
                 case DISP_EVT_SMS_RECEIVED: ++sms_count; break;
                 case DISP_EVT_RING: ringing = true; break;
             }
-            
+
+            // Check if we want to immediatly restart the loop if event is not significant
+            if (evt.type == DISP_EVT_MODEM_READY || evt.type == DISP_EVT_MODEM_NET || evt.type == DISP_EVT_MODEM_LOST) {
+                if (current_page != PAGE_HOME) {
+                    xSemaphoreGive(epd_mutex);
+                    continue;
+                }
+            }
+
             // Handle screen wake & changes
             if (image_buf1 && image_buf4) {
                 // Chirp screen awake
@@ -656,15 +747,17 @@ static void displayTask(void *pv) {
         } 
         
         // Low activity
-        if (screen_on && (xTaskGetTickCount() - last_activity_tick) >= pdMS_TO_TICKS(idle_timeout_ms)) {
+        if (screen_on && current_page != PAGE_IDLE && (xTaskGetTickCount() - last_activity_tick) >= pdMS_TO_TICKS(idle_timeout_ms)) {
             printf("Activity low in displayTask.\r\n");
             last_activity_tick = xTaskGetTickCount();
             ++idle_timeout_count;
         }
 
-        // No activity sleeping ?
-        if (idle_timeout_count >= 5 && screen_on){
-            Display_Sleep(false); 
+        // No activity show idle page
+        if (screen_on && idle_timeout_count >= 3 && current_page != PAGE_IDLE) {
+            printf("Switching to idle page due to inactivity.\r\n");
+            Display_Event_ShowIdle();
+            idle_timeout_count = 0; 
         }
     }
 }
@@ -682,7 +775,9 @@ static void Display_StartTask(void) {
 void Display_Init(void) {
     // Mutex creation for displayTask and command buffer
     if (!epd_mutex && !cmd_buffer.mutex) {
+        // Main mutex for display ops
         epd_mutex = xSemaphoreCreateMutex();
+        // Mutex for shared command buffer
         cmd_buffer.mutex = xSemaphoreCreateMutex();
         if (!epd_mutex || !cmd_buffer.mutex) {
             printf("ERROR: Failed to create necessary mutex for display!\r\n");

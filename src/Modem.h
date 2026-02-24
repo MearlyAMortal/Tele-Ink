@@ -33,11 +33,16 @@ typedef struct ModemCmd {
 
 // Public
 bool Modem_Init(HardwareSerial *serial, int rxPin, int txPin, int powerPin);
+void Modem_Restart(void);
 bool Modem_Status(void);
 bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeout_ms);
 void Modem_TogglePWK(uint32_t duration_ms);
 bool Modem_SendSMS(const char *message, const char* number, uint32_t timeout_ms);
 bool Modem_SetCheckMode(uint8_t mode);
+
+void GNSS_ToOneLinerAndUpdate(const char *input, char *output, size_t out_size);
+void ReplaceControlChars(char* s);
+
 
 // Private
 

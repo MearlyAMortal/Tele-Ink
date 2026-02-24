@@ -36,16 +36,6 @@ static void TrimRight(char* s) {
     }
 }
 
-// Removes anything not ASCII and makes it a space
-static void ReplaceControlChars(char* s) {
-    if (!s) return;
-    for (char *c = s; *c; c++) {
-        if (*c < 0x20 || *c >= 0x7F) {
-            *c = ' ';
-        }
-    }
-}
-
 
 // Returns true if 10 digit number (can include +CC)
 static bool Sms_IsValidNumber(const char* s) {
@@ -115,44 +105,6 @@ static void SetUnreadSmsNumbers(char* id_str, const int* ids, int um) {
             strcat(id_str, ",");
         }
     }
-}
-
-// Converts NMEA-style latitude/longitude to decimal degrees
-static double nmea_to_decimal(const char *val, char dir) {
-    double deg, min;
-    int deg_width = (dir == 'N' || dir == 'S') ? 2 : 3;
-    char deg_str[4] = {0};
-    strncpy(deg_str, val, deg_width);
-    deg = atof(deg_str);
-    min = atof(val + deg_width);
-    double dec = deg + min / 60.0;
-    if (dir == 'S' || dir == 'W') dec = -dec;
-    return dec;
-}
-
-
-// Converts GNSS input to a one-line summary
-void GNSS_ToOneLiner(const char *input, char *output, size_t out_size) {
-    char lat[16], ns, lon[16], ew, date[8], time[10], alt[8], spd[8];
-    // Parse the fields
-    int n = sscanf(input, "%15[^,],%c,%15[^,],%c,%6[^,],%9[^,],%7[^,],%7[^,]",
-        lat, &ns, lon, &ew, date, time, alt, spd);
-    if (n < 8) {
-        snprintf(output, out_size, "Error: Failed to fix or parse");
-        return;
-    }
-    double lat_dd = nmea_to_decimal(lat, ns);
-    double lon_dd = nmea_to_decimal(lon, ew);
-
-    // Format date and time
-    char date_fmt[16], time_fmt[16];
-    snprintf(date_fmt, sizeof(date_fmt), "20%c%c-%c%c-%c%c", date[4], date[5], date[2], date[3], date[0], date[1]);
-    snprintf(time_fmt, sizeof(time_fmt), "%c%c:%c%c:%c%c", time[0], time[1], time[2], time[3], time[4], time[5]);
-
-    // Output one-liner
-    snprintf(output, out_size,
-        "La: %.6f Lo: %.6f UTC: %s Date: %s Alt: %sm Spd: %skn",
-        lat_dd, lon_dd, time_fmt, date_fmt, alt, spd);
 }
 
 
@@ -321,7 +273,14 @@ void Command_Handle(void){
     }
     else if (gnss_mode) {
         if (strcmp(in, "/exit") == 0) {
-            Command_SetDone("Exiting GNSS mode");
+            if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+                if (gnss_data.gnss_on) {
+                    Command_SetDone("Exiting mode GNSS: ON");
+                } else {
+                    Command_SetDone("Exiting mode GNSS: OFF");
+                }
+                xSemaphoreGive(gnss_data.mutex);
+            }
             gnss_mode = false;
             return;
         }  
@@ -331,9 +290,12 @@ void Command_Handle(void){
             if (!Modem_SendAT("AT+CGPS=1", gnss_info, sizeof(gnss_info), 5000)){
                 Command_SetDone("Error: Failed to turn on GNSS");
             } else {
-                ReplaceControlChars(gnss_info);
+                //ReplaceControlChars(gnss_info);
+                if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+                    gnss_data.gnss_on = true;
+                    xSemaphoreGive(gnss_data.mutex);
+                }
                 Command_SetDone("GNSS turned on wait for fix");
-                gnss_on = true;
             }
         } 
         else if (strncmp(in, "off", 3) == 0) {
@@ -342,13 +304,20 @@ void Command_Handle(void){
             } else {
                 ReplaceControlChars(gnss_info);
                 Command_SetDone("GNSS turned off");
-                gnss_on = false;
+                if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+                    gnss_data.gnss_on = false;
+                    xSemaphoreGive(gnss_data.mutex);
+                }
             }
         }
         else if (strncmp(in, "info", 4) == 0) {
-            if (!gnss_on) {
-                Command_SetDone("Error: GNSS is not on");
-                return;
+            if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+                if (!gnss_data.gnss_on) {
+                    Command_SetDone("Error: GNSS is not on");
+                    xSemaphoreGive(gnss_data.mutex);
+                    return;
+                }
+                xSemaphoreGive(gnss_data.mutex);
             }
             if (!Modem_SendAT("AT+CGPSINFO", gnss_info, sizeof(gnss_info), 5000)){
                 Command_SetDone("Error: Failed to get GNSS");
@@ -356,8 +325,7 @@ void Command_Handle(void){
                 ReplaceControlChars(gnss_info);
                 char *data = gnss_info + strlen("AT+CGPSINFO +CGPSINFO: ");
                 while (*data == ' ') data++;
-
-                GNSS_ToOneLiner(data, gnss_info, sizeof(gnss_info));
+                GNSS_ToOneLinerAndUpdate(data, gnss_info, sizeof(gnss_info));
                 Command_SetDone(gnss_info);
             }
         }
@@ -395,7 +363,7 @@ void Command_Handle(void){
             DEV_Delay_ms(8000);
             ESP.restart();
         } else {
-            strcpy(out, "Error: ESP command unrecognized");
+            strcpy(out, "Error: Command Unrecognized");
         }
     }
     // Modem external control
@@ -406,12 +374,17 @@ void Command_Handle(void){
         } else if (strncmp(in, "/sim off", 8) == 0) {  
             Modem_TogglePWK(3000);
             strcpy(out, "Toggled pwk on modem for off");
-        } else if (strncmp(in, "/sim net", 8) == 0 && modem_ready) {
+        } else if (strncmp(in, "/sim rst", 8) == 0) {  
+            Modem_Restart();
+            strcpy(out, "Restarting modem wait ~35s");
+        } 
+        else if (strncmp(in, "/sim net", 8) == 0 && modem_ready) {
             char tmp[256] = {0};
             Modem_SendAT("AT+CREG?", tmp, sizeof(tmp), 5000);
+            ReplaceControlChars(tmp);
             strcpy(out, tmp);
         } else {
-            strcpy(out, "Error: Modem command unrecognized");
+            strcpy(out, "Error: Command Unrecognized");
         }
     }
     // Start modem sms wizard /sms <number> 
@@ -419,6 +392,15 @@ void Command_Handle(void){
         if (!modem_ready){
             Command_SetDone("Error: Modem is not ready");
             return;
+        }
+        if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+            if (gnss_data.gnss_on) {
+                Command_SetDone("Error: Turn off GNSS first");
+                sms_send = false;
+                xSemaphoreGive(gnss_data.mutex);
+                return;
+            }
+            xSemaphoreGive(gnss_data.mutex);
         }
         // Enable text mode
         char tmp[512] = {0};
@@ -515,12 +497,12 @@ void Command_Handle(void){
             return;
         }
         gnss_mode = true;
-        strcpy(out, "GNSS mode activated use: 'on'");
+        strcpy(out, "GNSS mode: on, off, info");
     }
     
     
     // Set cmd.buffer output and state
-    if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
         strcpy(cmd_buffer.output, out);
         cmd_buffer.state = CMD_STATE_DONE;
         xSemaphoreGive(cmd_buffer.mutex);

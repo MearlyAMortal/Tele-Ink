@@ -77,7 +77,7 @@ typedef struct {
     char history[CMD_HISTORY_LINES][CMD_BUFFER_SIZE];
     int history_count;
     CommandState state;
-    SemaphoreHandle_t mutex; // Protects access to input/output buffers
+    SemaphoreHandle_t mutex;
 } CommandBuffer;
 
 extern CommandBuffer cmd_buffer;
@@ -93,7 +93,21 @@ extern bool sms_read;
 extern int sms_count; 
 extern bool at_mode;
 extern bool gnss_mode;
-extern bool gnss_on;
+// GNSS
+//extern bool gnss_on;
+typedef struct {
+    bool gnss_on;
+    char speed[8];
+    char altitude[8];
+    char date[12];
+    char time[10];
+    double latitude;
+    double longitude;
+    SemaphoreHandle_t mutex;
+} GNSSData;
+
+extern GNSSData gnss_data;
+
 
 // Post event to display task
 bool Display_PostEvent(const DisplayEvent *evt, TickType_t ticksToWait);
@@ -105,6 +119,8 @@ void Display_Event_ShowCommand(void);
 void Display_Event_WifiConnected(void);
 // Update internal display ds
 void Display_ClearCommandHistory(void);
+
+void SetLastActivityTick(void);
 
 
 
