@@ -7,7 +7,7 @@
 1. Utilizes E-Ink display for low power/holding images while off
 2. USB-C Charging and 2500Mah internal battery 
 3. Full Qwerty keyboard with arrow keys and sym key
-4. Hologram SIM for automatic network switching +43 Country code and 13 digit number
+4. Hologram SIM for automatic network switching +46 Country code and 13 digit number
 5. Full Global Roaming 4g/3g/2g/LTE/GNSS/PPP/etc (no voice)
 6. WiFi is available for connection/hosting but commented out for now to save upload time.
 7. Can send/recive SMS messages and get local time and coordinate information.
