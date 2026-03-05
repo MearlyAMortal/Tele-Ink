@@ -18,26 +18,10 @@ static uint8_t modem_tx_pin = -1;
 // Modem state
 static SemaphoreHandle_t modem_mutex = NULL;
 static TaskHandle_t modem_task_handle = NULL;
-static TaskHandle_t modem_status_task_handle = NULL;
-static TaskHandle_t modem_gnss_task_handle = NULL;
+static TaskHandle_t modem_background_task_handle = NULL;
 static QueueHandle_t modem_cmd_queue = NULL;
 static ModemCmd *current_cmd = NULL;
-
-// new response sync objects
-//static SemaphoreHandle_t modem_resp_sem = NULL;
-
-//static bool modem_ready = false;
 static bool modem_serial_begun = false;
-static bool modem_idle = false;
-
-
-// FD
-static void Modem_StartTask(void);
-static bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeout_ms);
-static bool Modem_WaitOnlyOK(uint32_t timeout_ms);
-static bool Modem_HandleURC(const char *line);
-static void modemTask(void *pv);
-
 
 // Removes anything not ASCII and makes it a space
 void ReplaceControlChars(char* s) {
@@ -49,6 +33,7 @@ void ReplaceControlChars(char* s) {
     }
 }
 
+// Public function for toggling modem PWK high for duration_ms to trigger power on/off or reset depending on duration
 void Modem_TogglePWK(uint32_t duration_ms) {
     if (modemPowerPin == -1) {
         printf("Modem: No power pin provided.\r\n");
@@ -60,6 +45,7 @@ void Modem_TogglePWK(uint32_t duration_ms) {
     digitalWrite(modemPowerPin, LOW);
 }
 
+// Public function for easy restarting the modem automatically with the correct timing (long press then short press)
 void Modem_Restart(void) {
     if (!modem_ready) {
         printf("Modem_Restart: Modem not ready, cannot restart.\r\n");
@@ -73,53 +59,23 @@ void Modem_Restart(void) {
     printf("Modem restarted.\r\n");
 }
 
+// Writes raw data to modem while mutex is taken, returns true if all bytes written successfully before timeout, false if error or timeout
 static bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeout_ms) {
     if (!modemSerial || !modem_ready) return false;
     if (!data || len == 0) return true;
+    if (!modem_mutex) return false;
 
-    if (modem_mutex) {
-        if (xSemaphoreTake(modem_mutex, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) return false;
-    } 
-    size_t written = modemSerial->write(data, len);
-    modemSerial->flush();
-    if (modem_mutex) xSemaphoreGive(modem_mutex);
-    return written == len;
+    if (xSemaphoreTake(modem_mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) {
+        size_t written = modemSerial->write(data, len);
+        modemSerial->flush();
+        if (modem_mutex) xSemaphoreGive(modem_mutex);
+        return written == len;
+    }
+    return false;
 }
 
-/*
-static bool Modem_WaitOnlyOK(uint32_t timeout_ms) {
-    ModemCmd *w = (ModemCmd*)malloc(sizeof(ModemCmd));
-    if (!w) return false;
-    memset(w, 0, sizeof(*w));
-
-    w->cmd[0] = '\0';
-    w->resp[0] = '\0';
-    w->timeout_ms = timeout_ms;
-    w->waitForOK = true;
-    w->noTx = true;
-    w->done_sem = xSemaphoreCreateBinary();
-    if (!w->done_sem) { free(w); return false; }
-
-    if (xQueueSend(modem_cmd_queue, &w, pdMS_TO_TICKS(2000)) != pdTRUE) {
-        vSemaphoreDelete(w->done_sem);
-        free(w);
-        return false;
-    }
-
-    bool ok = false;
-    if (xSemaphoreTake(w->done_sem, pdMS_TO_TICKS(timeout_ms + 500)) == pdTRUE) {
-        ok = (strstr(w->resp, "OK") != NULL) 
-        && (strstr(w->resp, "ERROR") == NULL) 
-        && (strstr(w->resp, "+CME ERROR") == NULL) 
-        &&(strstr(w->resp, "+CMS ERROR") == NULL);
-    }
-
-    vSemaphoreDelete(w->done_sem);
-    free(w);
-    return ok;
-}
-*/
-// Queue a wait-only command (returns the handle)
+// Wait for the queued command to finish and return result before continuing in the main task
+// Uses malloc and free which can cause fragmentation but should be fine since commands are not frequent
 static ModemCmd* Modem_QueueWaitOnly(uint32_t timeout_ms) {
     ModemCmd *w = (ModemCmd*)malloc(sizeof(ModemCmd));
     if (!w) return NULL;
@@ -139,7 +95,7 @@ static ModemCmd* Modem_QueueWaitOnly(uint32_t timeout_ms) {
     return w;
 }
 
-// Wait for the queued command to finish and return result
+// Wait until response is recived then signal to sender and free the wait struct. Returns true if OK received, false if error or timeout
 static bool Modem_WaitAndFree(ModemCmd *w, uint32_t timeout_ms) {
     if (!w) return false;
     bool ok = false;
@@ -154,63 +110,11 @@ static bool Modem_WaitAndFree(ModemCmd *w, uint32_t timeout_ms) {
     return ok;
 }
 
-
-// Returns true if modem mode was set or already in that mode, false if error
-bool Modem_SetCheckMode(uint8_t mode) {
-    if (mode != 0 && mode != 1) return false;
-
-    if (mode == modem_mode) return true;
-
-    char tmp[32] = {0};
-    if (!Modem_SendAT("AT+CMGF=1", tmp, sizeof(tmp), 2000)) {
-        printf("SMS: CMGF failed\r\n");
-        return false;
-    }
-    modem_mode = mode;
-    return true;
-}
-
-
-// Send message to number, get prompt, write message and ctrl+z, wait for response. Returns true if OK received, false if error or timeout.
-bool Modem_SendSMS(const char *number, const char *message, uint32_t timeout_ms) {
-    if (!number || !number[0] || !message) return false;
-
-    if (!Modem_SetCheckMode(1)) return false;
-    char cmgs[96] = {0};
-    char resp[32] = {0};
-    snprintf(cmgs, sizeof(cmgs), "AT+CMGS=\"%s\"", number);
-    Modem_SendAT(cmgs, resp, sizeof(resp), timeout_ms);
-    if (strchr(resp, '>') == NULL) {
-        printf("SMS: no > prompt\r\n");
-        return false;
-    }
-
-    ModemCmd *w = Modem_QueueWaitOnly(timeout_ms);
-    if (!w) return false;
-    DEV_Delay_ms(100);
-
-    if (!Modem_WriteRaw((uint8_t*)message, strlen(message), timeout_ms)) {
-        printf("SMS: write body failed\r\n");
-        return false;
-    }
-
-    const uint8_t ctrlz = 0x1A;
-    if (!Modem_WriteRaw(&ctrlz, 1, timeout_ms)) {
-        printf("SMS: write ctrlz failed\r\n");
-        return false;
-    }
-    bool ok = Modem_WaitAndFree(w, timeout_ms);
-    return ok;
-}
-
-
-
 // Sends AT command to modem and waits for response. (safe)
 bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeout_ms) {
     if (!modemSerial || !cmd || !resp || resp_len == 0) return false;
     ModemCmd *r = (ModemCmd*)malloc(sizeof(ModemCmd)); // Heap
     if (!r) return false;
-    //printf("Modem_SendAT malloc OK\r\n");
     strncpy(r->cmd, cmd, sizeof(r->cmd)-1); 
     r->cmd[sizeof(r->cmd)-1]=0;
     r->done_sem = xSemaphoreCreateBinary();
@@ -233,8 +137,7 @@ bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeout
         // copy to caller buffer
         strncpy(resp, r->resp, resp_len-1);
         resp[resp_len-1] = '\0';
-        //ok = true; 
-         // Check for actual OK (or > for SMS prompt)
+        // Check for actual OK (or > for SMS prompt)
         ok = (strstr(resp, "OK") != NULL || strchr(resp, '>') != NULL) &&
              (strstr(resp, "ERROR") == NULL) &&
              (strstr(resp, "+CME ERROR") == NULL) &&
@@ -243,19 +146,68 @@ bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeout
 
     vSemaphoreDelete(r->done_sem);
     free(r);
-    //printf("Modem_SendAT free OK\r\n");
     return ok;
 }
 
+// Returns true if modem mode was set or already in that mode, false if error
+bool Modem_SetCheckMode(uint8_t mode) {
+    if (mode != 0 && mode != 1) return false;
+    if (mode == modem_mode) return true;
+
+    char tmp[32] = {0};
+    if (!Modem_SendAT("AT+CMGF=1", tmp, sizeof(tmp), 2000)) {
+        printf("SetCheckMode: CMGF failed\r\n");
+        return false;
+    }
+    modem_mode = mode;
+    return true;
+}
+
+// Send message to number, get prompt, write message and ctrl+z, wait for response. Returns true if OK received, false if error or timeout.
+bool Modem_SendSMS(const char *number, const char *message, uint32_t timeout_ms) {
+    if (!number || !number[0] || !message) return false;
+
+    if (!Modem_SetCheckMode(1)) return false;
+    char cmgs[96] = {0};
+    char resp[32] = {0};
+    snprintf(cmgs, sizeof(cmgs), "AT+CMGS=\"%s\"", number);
+    Modem_SendAT(cmgs, resp, sizeof(resp), timeout_ms);
+    if (strchr(resp, '>') == NULL) {
+        printf("SMS: no > prompt\r\n");
+        return false;
+    }
+
+    ModemCmd *w = Modem_QueueWaitOnly(timeout_ms);
+    if (!w) return false;
+    DEV_Delay_ms(100);
+    // Write message body
+    if (!Modem_WriteRaw((uint8_t*)message, strlen(message), timeout_ms)) {
+        printf("SMS: write body failed\r\n");
+        return false;
+    }
+    // Write ctrl+z to send
+    const uint8_t ctrlz = 0x1A;
+    if (!Modem_WriteRaw(&ctrlz, 1, timeout_ms)) {
+        printf("SMS: write ctrlz failed\r\n");
+        return false;
+    }
+    // Wait for response and free wait struct
+    bool ok = Modem_WaitAndFree(w, timeout_ms);
+    return ok;
+}
 
 static bool Modem_HandleURC(const char *line) {
-    if (strncmp(line, "+CMTI:", 6) == 0) {
+    if (strcmp(line, "OK") == 0) {
+        return true;
+    }
+    else if (strncmp(line, "+CMTI:", 6) == 0) {
         printf("SMS recieved! Index: %s\r\n", line + 12);
         DisplayEvent e = { .type = DISP_EVT_SMS_RECEIVED, .payload = NULL};
         Display_PostEvent(&e, 0);
         DEV_Delay_ms(250);
         return true;
-    } else {
+    } 
+    else {
         printf("Modem URC unhandled: %s\r\n", line);
     }
     return false;
@@ -379,7 +331,6 @@ bool is_empty_gnss(const char *input) {
     return comma_count >= 7;
 }
 
-
 // Converts GNSS AT output to a one-line summary, takes mutex internally, updates global gnss_data, sends display event if we on home page for update
 void GNSS_ToOneLinerAndUpdate(const char *input, char *output, size_t out_size) {
     char lat[16], ns, lon[16], ew, date[8], time[10], alt[8], spd[8];
@@ -438,85 +389,126 @@ void GNSS_ToOneLinerAndUpdate(const char *input, char *output, size_t out_size) 
     } else {
         printf("GNSS_ToOneLinerAndUpdate: failed to take gnss_data mutex\r\n");
     }
-    // Update full screen if in home screen and on since that is the only screen that shows gnss data for now
-    // Non partial update becuase homescreen is now static with dynamic updates not interpolating
-    if (screen_on && current_page == PAGE_HOME) {
-        DisplayEvent e = { .type = DISP_EVT_WAKE, .payload = NULL};
-        Display_PostEvent(&e, 0);
-        DEV_Delay_ms(250);
-    }
-    
+    // Requires user to repaint if they want current data rather than spamming fullscreen updates 
 }
 
-static void ModemGNSSPollTask(void *pv) {
+// Parses +CESQ response, updates global signal_data with mutex, returns true if parsed and updated successfully, false if error
+static bool CESQ_ParseAndUpdate(const char *input) {
+    uint8_t rxl, ber, rscp, ecno, rsrq, rsrp;
+    if (sscanf(input, "%hhu,%hhu,%hhu,%hhu,%hhu,%hhu", &rxl, &ber, &rscp ,&ecno, &rsrq, &rsrp) != 6) {
+        return false;
+    }
+    if (xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+        signal_data.rxlev = rxl;
+        signal_data.ber = ber;
+        signal_data.rscp = rscp;
+        signal_data.ecno = ecno;
+        signal_data.rsrq = rsrq;
+        signal_data.rsrp = rsrp;
+        xSemaphoreGive(signal_data.mutex);
+        return true;
+    } else {
+        printf("CESQ_ParseAndUpdate: failed to take signal_data mutex\r\n");
+        return false;
+    }
+}
+
+
+// Handles modem status checking, +CESQ polling, and GNSS polling. URC is still handled by main task (not time sensitive)
+// One task for all background tasks other than URC becuase task switching overhead was inhibiting other tasks
+// Use task tick count for correct delay times on each specifc background job
+static void ModemBackgroundTask(void *pv) {
     (void)pv;
-    char gnss_resp[128] = {0};
-    bool on = false;
+    char resp[128] = {0};
+    bool gnss = false;
+
+    TickType_t last_status_check = xTaskGetTickCount();
+    TickType_t last_cesq_call = xTaskGetTickCount();
+    TickType_t last_gnss_call = xTaskGetTickCount();
+    TickType_t now = 0;
+
     for (;;) {
-        if (!modem_ready) {
-            DEV_Delay_ms(30000);
+        now = xTaskGetTickCount();
+        // Status handling if enough time has passed since last check (10s)
+        // Status check can be high blocking for modemTask but want responsive system diagnosis
+        if (now - last_status_check >= pdMS_TO_TICKS(10000)) {
+            if (Modem_CheckStatus()) printf("Modem status changed!\r\n");
+            last_status_check = now;
+        }
+        // No need to proceed, the modem is not ready for anything. Wait a full second before checking again (could be intentionally not ready)
+        if (!modem_ready || !modem_net) {
+            DEV_Delay_ms(1000);
             continue;
         }
-        if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
-            on = gnss_data.gnss_on;
-            xSemaphoreGive(gnss_data.mutex);
-        }
-        if (on && modem_ready) {
-            if (Modem_SendAT("AT+CGPSINFO", gnss_resp, sizeof(gnss_resp), 2000)) {
-                ReplaceControlChars(gnss_resp);
-                char *data = gnss_resp + strlen("AT+CGPSINFO +CGPSINFO: ");
-                while (*data == ' ') data++;
-                GNSS_ToOneLinerAndUpdate(data, gnss_resp, sizeof(gnss_resp));
+        // CESQ handling if enough time has passed since last check (15s)
+        if (now - last_cesq_call >= pdMS_TO_TICKS(15000)) {
+            if (Modem_SendAT("AT+CESQ", resp, sizeof(resp), 2000)) {
+                ReplaceControlChars(resp);
+                char *data = strstr(resp, "+CESQ:");
+                if (data) {
+                    data += strlen("+CESQ:");
+                    while (*data == ' ') data++;
+                    // First try always fails due to OK appearing before response from previous command?
+                    if (!CESQ_ParseAndUpdate(data)){
+                        printf("ModemCESQTask: Failed to parse and update CESQ data\r\n");
+                    }
+                } else {
+                    printf("ModemCESQTask: No +CESQ: in response!\r\n");
+                }
             }
-            
+            last_cesq_call = now;
+            memset(resp, 0, sizeof(resp));
         }
-        // Offset delay
-        // Needs to be its own painting for gnss if i want to update faster
-        if (on && gnss_mode && current_page == PAGE_HOME) {
-            DEV_Delay_ms(15000);
-        } else {
-            DEV_Delay_ms(45000);
+        // GNSS handling if enought time has passed since last check and GNSS is on.
+        if (now - last_gnss_call >= pdMS_TO_TICKS(15000)) {
+            if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+                gnss = gnss_data.gnss_on;
+                xSemaphoreGive(gnss_data.mutex);
+            }
+            if (gnss && modem_ready) {
+                if (Modem_SendAT("AT+CGPSINFO", resp, sizeof(resp), 2000)) {
+                    ReplaceControlChars(resp);
+                    char *data = resp + strlen("AT+CGPSINFO +CGPSINFO: ");
+                    while (*data == ' ') data++;
+                    GNSS_ToOneLinerAndUpdate(data, resp, sizeof(resp));
+                }
+                
+            }
+            last_gnss_call = now;
+            memset(resp, 0, sizeof(resp));
         }
+        // Loop half a second if no jobs are ready (not expensive)
+        DEV_Delay_ms(500);
     }
 }
 
-static void Modem_StartGNSSPollTask(void) {
-    if (!modem_gnss_task_handle) {
-        xTaskCreatePinnedToCore(ModemGNSSPollTask, "modemGNSS", 4096, NULL, 4, &modem_gnss_task_handle, 1);
+
+// Handles status, signal quality, and GNSS polling. URC is still handled by main task
+static void Modem_StartBackgroundTask(void) {
+    if (!modem_background_task_handle) {
+        xTaskCreatePinnedToCore(ModemBackgroundTask, "modemBackground", 4096, NULL, 4, &modem_background_task_handle, 1);
     }
 }
 
-// Modem background task to handle the modems physical state
-static void ModemStatusTask(void *pv) {
-    (void)pv;
-    for (;;) {
-        if (Modem_CheckStatus()) printf("Modem status changed!\r\n");
-        DEV_Delay_ms(10000); // 10s
-    }
-}
 
-static void Modem_StartStatusTask(void) {
-    // Less prioriety than main task
-    if (!modem_status_task_handle) {
-        xTaskCreatePinnedToCore(ModemStatusTask, "modemStatus", 4096, NULL, 3, &modem_status_task_handle, 1);
-    }
-}
 
 // Modem background task to handle command queue and URCs
 // ready/powered/net State is external in display and handled by display events
+// display events are called from here so give some time for the display task to process them and update modem state 
 static void modemTask(void *pv) {
     (void)pv;
-    TaskHandle_t status_task_handle = NULL;
+    //TaskHandle_t status_task_handle = NULL;
     char line[256];
     size_t idx = 0;
 
     printf("Waiting 20s for modem coldstart\r\n");
     DEV_Delay_ms(20000);
 
-    // Create status check task
-    Modem_StartStatusTask();
-    DEV_Delay_ms(5000);
-    Modem_StartGNSSPollTask();
+    // Create background task to handle status, gnss, and cesq polling
+    Modem_StartBackgroundTask();
+    DEV_Delay_ms(1000);
+
+
     // Init complete, enter main loop to handle commands and URCs
     for (;;) {
         // if modem not ready, check current status
@@ -642,6 +634,8 @@ bool Modem_Init(HardwareSerial *serial, int rxPin, int txPin, int powerPin) {
     if (!modem_mutex) modem_mutex = xSemaphoreCreateMutex();
     // Mutex for gnss data access
     if (!gnss_data.mutex) gnss_data.mutex = xSemaphoreCreateMutex();
+    // Mutex for signal data access
+    if (!signal_data.mutex) signal_data.mutex = xSemaphoreCreateMutex();
     // Queue
     if (!modem_cmd_queue) modem_cmd_queue = xQueueCreate(4, sizeof(ModemCmd*));
     if (modemSerial) Modem_StartTask();

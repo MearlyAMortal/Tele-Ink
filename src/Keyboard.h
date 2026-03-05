@@ -1,7 +1,7 @@
 /*****************************************************************************
 * | File      	:   Keyboard.h
 * | Author      :   Logan Puntous
-* | Function    :   Initilize I2C, Create keyTask to poll keyboard and queue keypresses
+* | Function    :   Initilize I2C, Create keyTask to poll keyboard and queue keypresses into a shared buffer
 * | Info        :
 *----------------
 * |	This version:   V0.0.1
@@ -18,12 +18,6 @@
 #include "Wire.h"
 
 bool Keyboard_Init(TwoWire *i2cInstance, uint8_t i2cAddress);
-//void Keyboard_Start(void);
-bool Keyboard_GetChar(char *out, TickType_t wait);
-
-//void Keyboard_Stop(void);
-
-
 
 
 #endif // KEYBOARD_H

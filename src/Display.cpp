@@ -18,22 +18,24 @@
 bool screen_on = false;
 PageType current_page = PAGE_NONE;
 PageType last_page = PAGE_NONE;
-PageType boot_page = PAGE_BOOT;
+bool wifi_mode = false;
+bool wifi_scan = false;
+bool wifi_connected = false;
 bool modem_ready = false;
 bool modem_net = false;
 bool modem_powered = false;
 uint8_t modem_mode = 1;   // Default text mode not PDU mode
 bool sms_send = false;
 bool sms_read = false;
+bool sms_read_all = false;
 int sms_count = 0;
 bool at_mode = false;
 bool gnss_mode = false;
 CommandBuffer cmd_buffer = {0};
 GNSSData gnss_data = {0};
+SignalData signal_data = {0};
 // Private
 // Screen
-static UBYTE *reusable_buf = NULL;
-static UWORD *reusable_size = 0;
 static UBYTE *image_buf1 = NULL;
 static UWORD image_size1 = 0;
 static UBYTE *image_buf4 = NULL;
@@ -52,39 +54,18 @@ static uint32_t idle_page_tick_count = 0;
 static bool page_change_evt = false;
 static uint32_t partial_update_count = 0;
 // Modem
-//static int unread_sms = 0;
 static bool ringing = false;
-static TickType_t end = 0;
-// Wifi
-static bool wifi_connected = false;
-static bool wifi_on = false;
 // Paint
 static char idle_c[2] = {0};
-// FD Painting functions
-static UWORD getImageSizeForMode(uint8_t gray);
-static void paintConfigureForMode(uint8_t gray);
-static void paintHomeScreen(void);
-static void paintCommandScreen(void);
-static void paintBlankScreen(void);
-static void paintBootScreen(void);
-static void paintPhoneScreen(void);
-// FD Display task functions
-static void Display_StartTask(void);
-static void Display_HandleScreenChange(void);
-static void HandlePartialUpdate_command(void);
-static void HandlePartialUpdate_idle(void);
-static void Display_HandlePartialUpdate(void);
-static void displayTask(void *pv);
-static void Display_Sleep(bool clear_screen);
-static void Display_Wake(void);
-static void Display_UpdateFullScreen(void);
 
+
+// Public function for setting last activity tick in display loop for resetting idle timer
 void SetLastActivityTick(void) {
     last_activity_tick = xTaskGetTickCount();
     idle_timeout_count = 0; // Reset idle timeout count on activity
 }
 
-// Paint functions for dynamic display modes
+// Returns the image buffer size for a given gray mode
 static UWORD getImageSizeForMode(uint8_t gray) {
     if (gray == 4) {
         return ((EPD_3IN7_WIDTH % 4 == 0) ? (EPD_3IN7_WIDTH / 4) : (EPD_3IN7_WIDTH / 4 + 1)) * EPD_3IN7_HEIGHT;
@@ -92,6 +73,7 @@ static UWORD getImageSizeForMode(uint8_t gray) {
         return ((EPD_3IN7_WIDTH % 8 == 0) ? (EPD_3IN7_WIDTH / 8) : (EPD_3IN7_WIDTH / 8 + 1)) * EPD_3IN7_HEIGHT;
     }
 }
+// Configure paint API and specific image buffer for givin gray mode 
 static void paintConfigureForMode(uint8_t gray) {
     if (gray == 4 && image_buf4) {
         Paint_SelectImage(image_buf4);
@@ -101,40 +83,23 @@ static void paintConfigureForMode(uint8_t gray) {
         Paint_SetScale(2);
     }
 }
-
-// Page management 
+// Set the current page and update the last page
 static void setPage(PageType page) {
     last_page = current_page;
     current_page = page;
 }
-static void paintCurrentPage(void) {
-    switch (current_page) {
-        case PAGE_HOME:    paintHomeScreen(); break;
-        case PAGE_IDLE:    paintBlankScreen(); break;
-        case PAGE_COMMAND: paintCommandScreen(); break;
-        default: break;
-    }
-}
-
-
-// Paint screen
-static void paintPhoneScreen(void) {
-    paintConfigureForMode(4);
-    Paint_Clear(WHITE);
-    // title
-    Paint_DrawString_EN(10, 5, "erm", &Font24, BLACK, WHITE);
-    
-}
+// Painting the screen buffer with full screen static image for later interpolation or holding
 static void paintHomeScreen(void) {
     paintConfigureForMode(4);
     Paint_Clear(WHITE);
     // title
     Paint_DrawString_EN(10, 5, "Tele-Ink", &Font24, WHITE, BLACK);
-    Paint_DrawString_EN(160, 10, "Version 0.2.4", &Font12, WHITE, BLACK);
+    //Paint_DrawString_EN(160, 10, "Version 0.2.6", &Font12, WHITE, BLACK);
     // Seperator line
     Paint_DrawLine(5, 30, Font24.Width * 16, 30, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
 
-    // Horizontal split
+
+    // Vertical split
     Paint_DrawLine((display_w/2) + 40, 1, (display_w/2) + 40, (display_h/2) + 40, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
     // bottom split
     Paint_DrawLine(1, (display_h/2) + 40, display_w-1, (display_h/2) + 40, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
@@ -188,7 +153,7 @@ static void paintHomeScreen(void) {
     }
 
     // WIFI
-    if (wifi_on){
+    if (wifi_mode){
         Paint_DrawString_EN(10, 120, "Wifi +", &Font16, BLACK, WHITE);
         if (wifi_connected){
             Paint_DrawString_EN(10, 120, "Wifi ++", &Font16, BLACK, WHITE);
@@ -197,15 +162,50 @@ static void paintHomeScreen(void) {
         Paint_DrawString_EN(10, 120, "Wifi -", &Font16, BLACK, WHITE);
     }
 
-    // GNSS data
+    // Parse signal type and corresponding strength
+    if (xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+        char result[32] = {0};
+        // find current network type and corresponding signal strength/quality
+        // LTE (4G)
+        if (signal_data.rsrq != 255 && signal_data.rsrp != 255) {
+            if (signal_data.rsrq >= 0 && signal_data.rsrq <= 12) {
+                // poor signal
+                snprintf(result, sizeof(result), "4G LTE :(");
+            } else if (signal_data.rsrq > 12 && signal_data.rsrq <= 22) {
+                // moderate signal
+                snprintf(result, sizeof(result), "4G LTE :|");
+            } else if (signal_data.rsrq > 22 && signal_data.rsrq <= 34) {
+                // excellent signal
+                snprintf(result, sizeof(result), "4G LTE :)");
+            }
+        } 
+        // 3G fallback (UMTS/WCDMA)
+        else if (signal_data.rscp != 255 && signal_data.ecno != 255) {
+            snprintf(result, sizeof(result), "3G");
+        }
+        // 2G unlikely fallback (GSM)
+        else if (signal_data.rxlev != 99 && signal_data.ber != 99) {
+            snprintf(result, sizeof(result), "2G");
+        }   
+        // No signal
+        else {
+            snprintf(result, sizeof(result), "No Service");
+        }
+        Paint_DrawString_EN((display_w/2) + 30 - (strlen(result) * Font16.Width), 8, result, &Font16, BLACK, WHITE);
+        //Paint_DrawString_EN(160, 10, "Version 0.2.4", &Font12, WHITE, BLACK);
+
+        xSemaphoreGive(signal_data.mutex);
+    }
+
+    // GNSS data (must be last)
     if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
         // 
         if (gnss_data.time[0] == '\0') {
-            Paint_DrawString_EN(display_w - 10 - (Font16.Width * strlen("GNSS Unavailable")), 10, "GNSS Unavailable", &Font16, BLACK, WHITE);
+            Paint_DrawString_EN(display_w - 10 - (Font16.Width * strlen("GNSS Unavailable")), 5, "GNSS Unavailable", &Font16, BLACK, WHITE);
             xSemaphoreGive(gnss_data.mutex);
             return;
         }
-        char result[64];
+        char result[64] = {0};
         double lon = gnss_data.longitude;
         // rouch longitute math for calculating local time from utc for display, not accounting for daylight savings or anything, just rough
         int local_time_offset = (int)(lon / 15); // 15 degrees of longitude per hour
@@ -278,8 +278,15 @@ static void paintBootScreen(void) {
     Paint_DrawString_EN(10, 200, "You can execute AT commands", &Font24, WHITE, GRAY3);
     Paint_DrawString_EN(10, 225, "Global Roaming GNSS 4G Data", &Font24, WHITE, GRAY4);
 }
-
-
+// Paint the current page based on internal state using specifc paint function
+static void paintCurrentPage(void) {
+    switch (current_page) {
+        case PAGE_HOME:    paintHomeScreen(); break;
+        case PAGE_IDLE:    paintBlankScreen(); break;
+        case PAGE_COMMAND: paintCommandScreen(); break;
+        default: break;
+    }
+}
 
 // Wakes screen from sleep and gets ready for painting and displaying
 static void Display_Wake(void) {
@@ -292,6 +299,7 @@ static void Display_Wake(void) {
         setPage(last_page); // GRAY_MODE should correlate...
     }
 
+    // Somehow working where I initilize 1 gray and can do 4 gray updates? Im just going with it since its faster.
     // Init 1Gray
     if (GRAY_MODE == 1) {
         printf("Initializing 1Gray mode wake\r\n");
@@ -324,13 +332,12 @@ static void Display_Sleep(bool clear_screen) {
     screen_on = false;
 }
 
-
-// Post event to display task
+// Public call to post display event for queue to consume and handle in display task
 bool Display_PostEvent(const DisplayEvent *evt, TickType_t ticksToWait) {
     if (!dispQueue) return false;
     return xQueueSend(dispQueue, evt, ticksToWait) == pdTRUE;
 }
-// Public event calls
+// Public easy access display event calls for common events
 void Display_Event_Wake(void) {
     DisplayEvent e = { .type = DISP_EVT_WAKE, .payload = NULL};
     Display_PostEvent(&e, 0);
@@ -351,11 +358,8 @@ void Display_Event_ShowIdle(void){
     DisplayEvent e = { .type = DISP_EVT_SHOW_IDLE, .payload = NULL};
     Display_PostEvent(&e, 0);
 }
-void Display_Event_WifiConnected(void) {
-    DisplayEvent e = { .type = DISP_EVT_WIFI_CONNECTED, .payload = NULL};
-    Display_PostEvent(&e, 0);
-}
-// Non event calls
+
+// Public call to clear the shared command history buffer in display task
 void Display_ClearCommandHistory(void) {
     if (cmd_buffer.mutex && xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         cmd_buffer.history_count = 0;
@@ -365,7 +369,6 @@ void Display_ClearCommandHistory(void) {
         xSemaphoreGive(cmd_buffer.mutex);
     }
 }
-
 
 // Paint the current screen again in 4gray
 static void Display_UpdateFullScreen(void) {
@@ -409,7 +412,6 @@ static void Display_HandleScreenChange(void) {
     }
 }
 
-
 // Gets data from command buffer and calculates wrapping buffer for long strings
 // paints data into respective locations and displays in 1Gray (no part disp = 500ms updates)
 static void HandlePartialUpdate_command(void) {
@@ -417,7 +419,7 @@ static void HandlePartialUpdate_command(void) {
     static char current_input[CMD_BUFFER_SIZE];
     static char history_copy[CMD_HISTORY_LINES][CMD_BUFFER_SIZE];
     int history_count = 0;
-    if (cmd_buffer.mutex && xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (cmd_buffer.mutex && xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         strcpy(current_input, cmd_buffer.input);
         history_count = cmd_buffer.history_count;
         for (int i = 0; i < history_count && i < CMD_HISTORY_LINES; i++) {
@@ -500,9 +502,6 @@ static void HandlePartialUpdate_command(void) {
     // Display final image :)    
     EPD_3IN7_1Gray_Display(image_buf1);
 }
-
-
-
 
 // Clear screen, small pseudo random animation to prevent burn in during idle
 static void HandlePartialUpdate_idle(void) {
@@ -643,7 +642,6 @@ static void HandlePartialUpdate_idle(void) {
     prev_ry = ry;
 }
 
-
 // Handle partial updates for current page (drawing and displaying)
 static void Display_HandlePartialUpdate(void) {
     paintConfigureForMode(1);
@@ -662,18 +660,48 @@ static void Display_HandlePartialUpdate(void) {
     }
 }
 
+// Reset signal_data to unknown values (for display) on modem lost or reset
+void SignalData_Reset(void) {
+    if (signal_data.mutex && xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        signal_data.rxlev = 99;
+        signal_data.ber = 99;
+        signal_data.rscp = 255;
+        signal_data.ecno = 255;
+        signal_data.rsrq = 255;
+        signal_data.rsrp = 255;
+        xSemaphoreGive(signal_data.mutex);
+    }
+}
+
+// Reset all public modes back to default 
+void ResetGlobalModeState(void) {
+    at_mode = false;
+    gnss_mode = false;
+    sms_send = false;
+    sms_read = false;
+    if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        gnss_data.gnss_on = false;
+        xSemaphoreGive(gnss_data.mutex);
+    }
+    wifi_mode = false;
+    wifi_connected = false;
+    wifi_scan = false;
+}
+
 // Display task
 static void displayTask(void *pv) {
     (void)pv;
     DisplayEvent evt;
     last_activity_tick = xTaskGetTickCount();
-    idle_c[0] = 'A'; // Start at a for idle character
+    idle_c[0] = 'A'; // Start at 'A' for idle character
 
-    // Time
-    //PAINT_TIME paint_time;
-    //paint_time.Hour = 0;
-    //paint_time.Min = 0;
-    //paint_time.Sec = 0;
+    // Set signal to unkown values to start
+    signal_data.rxlev = 99;
+    signal_data.ber = 99;
+    signal_data.rscp = 255;
+    signal_data.ecno = 255;
+    signal_data.rsrq = 255;
+    signal_data.rsrp = 255;
 
     for (;;) {
         // Wait for event 100ms polling if none do partial update
@@ -684,9 +712,7 @@ static void displayTask(void *pv) {
                 DEV_Delay_ms(POLL_MS*2);
                 continue;
             }
-
-            last_activity_tick = xTaskGetTickCount();
-            idle_timeout_count = 0;
+            SetLastActivityTick();
             // update internal state based or wake/sleep on event
             switch (evt.type) {
                 case DISP_EVT_SLEEP: Display_Sleep(true); xSemaphoreGive(epd_mutex); continue;
@@ -694,18 +720,17 @@ static void displayTask(void *pv) {
                 case DISP_EVT_SHOW_HOME: setPage(PAGE_HOME); page_change_evt = true; break;
                 case DISP_EVT_SHOW_COMMAND: setPage(PAGE_COMMAND); page_change_evt = true; break;
                 case DISP_EVT_SHOW_IDLE: setPage(PAGE_IDLE); page_change_evt = true; break;
-                case DISP_EVT_WIFI_ON: wifi_on = true; break;
-                case DISP_EVT_WIFI_CONNECTED: wifi_connected = true; break; 
                 case DISP_EVT_MODEM_POWERED: modem_powered = true; break;
                 case DISP_EVT_MODEM_READY: modem_ready = true; modem_powered = true; break;
                 case DISP_EVT_MODEM_NET: modem_ready = true; modem_powered = true; modem_net = true; break;
-                case DISP_EVT_MODEM_LOST: modem_ready = false; modem_net = false; break;
+                case DISP_EVT_MODEM_LOST: modem_ready = false; modem_net = false; SignalData_Reset(); ResetGlobalModeState(); break;
                 case DISP_EVT_SMS_RECEIVED: ++sms_count; break;
                 case DISP_EVT_RING: ringing = true; break;
             }
 
             // Check if we want to immediatly restart the loop if event is not significant
-            if (evt.type == DISP_EVT_MODEM_READY || evt.type == DISP_EVT_MODEM_NET || evt.type == DISP_EVT_MODEM_LOST) {
+            if (evt.type == DISP_EVT_MODEM_READY || evt.type == DISP_EVT_MODEM_NET || evt.type == DISP_EVT_MODEM_LOST
+                || evt.type == DISP_EVT_SMS_RECEIVED || evt.type == DISP_EVT_RING) {
                 if (current_page != PAGE_HOME) {
                     xSemaphoreGive(epd_mutex);
                     continue;
@@ -735,7 +760,9 @@ static void displayTask(void *pv) {
         if (GRAY_MODE == 1 && screen_on) {
             if (xSemaphoreTake(epd_mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
                 if (partial_update_count >= 60) {
-                    Display_UpdateFullScreen();
+                    if (current_page == PAGE_IDLE) {
+                        Display_UpdateFullScreen();
+                    }
                     partial_update_count = 0;
                 } else {
                     Display_HandlePartialUpdate();
@@ -743,7 +770,7 @@ static void displayTask(void *pv) {
                 }
                 xSemaphoreGive(epd_mutex);
             }
-            last_activity_tick = xTaskGetTickCount();
+            SetLastActivityTick();
         } 
         
         // Low activity
@@ -762,13 +789,13 @@ static void displayTask(void *pv) {
     }
 }
 
-
-
+// Start display task if not already running
 static void Display_StartTask(void) {
-    if (display_task_handle) return;
-    screen_on = true;
-    //Core 0, Priority 2
-    xTaskCreatePinnedToCore(displayTask, "display", 8192, NULL, 2, &display_task_handle, 0);
+    if (!display_task_handle) {
+        screen_on = true;
+        //Core 0, Priority 2
+        xTaskCreatePinnedToCore(displayTask, "display", 8192, NULL, 2, &display_task_handle, 0);
+    }
 }
 
 // Initialize display ds and start display task (does not send any events)

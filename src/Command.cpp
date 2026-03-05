@@ -7,8 +7,6 @@
 #include <string.h>
 
 static char sms_number[32] = {0};
-static bool sms_read_all = false;
-
 
 // Quick way to exit the if else tree if condition is not met
 // Takes a string for the output command (usually an error)
@@ -35,7 +33,6 @@ static void TrimRight(char* s) {
         }
     }
 }
-
 
 // Returns true if 10 digit number (can include +CC)
 static bool Sms_IsValidNumber(const char* s) {
@@ -95,7 +92,7 @@ static int GetUnreadSmsIndices(const char* resp, int* ids, int max_ids) {
     return count;
 }
 
-// make printable id response for display
+// Make printable id response for display
 static void SetUnreadSmsNumbers(char* id_str, const int* ids, int um) {
     for (int i = 0; i < um; i++) {
         char buf[8];
@@ -106,8 +103,6 @@ static void SetUnreadSmsNumbers(char* id_str, const int* ids, int um) {
         }
     }
 }
-
-
 
 // Interprets keyboard input and responds with an error or display/modem/etc event.
 void Command_Handle(void){
@@ -123,7 +118,7 @@ void Command_Handle(void){
 
     TrimRight(in);
 
-    // WIZARDS
+    // WIZARD WIZARDRY WINGARDIUM LEVIOSA
     // Check multi-line command mode first before handling base case
     // Send sms once collected number and message
     if (sms_send) {
@@ -166,11 +161,12 @@ void Command_Handle(void){
         if (strcmp(in, "/s") == 0 && sms_number[0] != '\0') {
             sms_send = true;
             char buf[32];
-            snprintf(buf, sizeof(buf), "Responding to: %s", sms_number); // Ensure null termination
+            snprintf(buf, sizeof(buf), "Responding: %s", sms_number); // Ensure null termination
             Command_SetDone(buf);
             return;
         }
         char cmd[32] = {0};
+        // Need relativly large buffer in case large amount of messages or message content
         char tmp[512] = {0};
         // Deleting message
         if (strncmp(in, "/d", 2) == 0) {
@@ -183,7 +179,7 @@ void Command_Handle(void){
                     sms_read_all = false;
                     Command_SetDone("Successfully deleted all SMS");
                 } else {
-                    Command_SetDone("Error: Failed to delete all SMS");
+                    Command_SetDone("Error: Failed to delete SMS");
                 }
                 return;
             }
@@ -248,7 +244,7 @@ void Command_Handle(void){
             while (*data == ' ') data++;
             Command_SetDone(data);
         } else {
-            Command_SetDone("Error: Invalid message number");
+            Command_SetDone("Error: No message ");
         }   
         return;
     }
@@ -267,7 +263,10 @@ void Command_Handle(void){
             Command_SetDone("Error: AT failed or timed out");
         } else {
             ReplaceControlChars(at_resp);
-            Command_SetDone(at_resp);
+            // Remove input echo from response
+            char *resp_data = at_resp + strlen(at_cmd);
+            while (*resp_data == ' ') resp_data++;
+            Command_SetDone(resp_data);
         }
         return;
     }
@@ -334,6 +333,23 @@ void Command_Handle(void){
         }
         return;
     }
+    else if (wifi_mode) {
+        if (strcmp(in, "/exit") == 0) {
+            Command_SetDone("Exiting WiFi mode");
+            wifi_mode = false;
+            // disconnect wifi and or scan maybe
+            wifi_connected = false;
+            wifi_scan = false; 
+            return;
+        } 
+        if (strncmp(in, "scan", 4) == 0) {
+            //
+        }
+        else if (strncmp(in, "connect", 7) == 0) {
+            //
+        }
+        return;
+    }
 
 
     // PARSE default $ INPUT
@@ -348,13 +364,13 @@ void Command_Handle(void){
 
     // If else tree of doom that can select mode or exectute specific commands
     // Help menu
-    if (strcmp(in, "/help") == 0) {
-        strcpy(out, "Check GitHub README");
+    if (strcmp(in, "/help") == 0 || strcmp(in, "/h") == 0) {
+        strcpy(out, "CMDS: /at /gnss /sms /sim /clear");
     } 
     // Clear history
     else if (strcmp(in, "/clear") == 0) {
         Display_ClearCommandHistory();
-        strcpy(out, "History cleared");
+        strcpy(out, "History cleared!");
     }
     // ESP control
     else if (strncmp(in, "/esp", 4) == 0) {
@@ -369,14 +385,32 @@ void Command_Handle(void){
     // Modem external control
     else if (strncmp(in, "/sim", 4) == 0) {
         if (strncmp(in, "/sim on", 7) == 0) {  
+            if (!modem_ready) {
+                Modem_TogglePWK(1200);
+                strcpy(out, "Toggled pwk on modem on");
+            } else {
+                strcpy(out, "Error: Modem is on");
+            }
             Modem_TogglePWK(1200);
-            strcpy(out, "Toggled pwk on modem for on");
+            strcpy(out, "Toggled pwk on modem on");
         } else if (strncmp(in, "/sim off", 8) == 0) {  
-            Modem_TogglePWK(3000);
-            strcpy(out, "Toggled pwk on modem for off");
+            if (modem_ready) {
+                Modem_TogglePWK(3000);
+                ResetGlobalModeState();
+                strcpy(out, "Toggled pwk on modem off");
+            } else {
+                strcpy(out, "Error: Modem is off");
+            }
         } else if (strncmp(in, "/sim rst", 8) == 0) {  
-            Modem_Restart();
-            strcpy(out, "Restarting modem wait ~35s");
+            if (modem_ready) {
+                Modem_Restart();
+                ResetGlobalModeState();
+                strcpy(out, "Restarted modem");
+            } else {
+                strcpy(out, "Error: Modem is not ready");
+            }
+            // Holds user for the entire restart process
+            strcpy(out, "Restarted modem");
         } 
         else if (strncmp(in, "/sim net", 8) == 0 && modem_ready) {
             char tmp[256] = {0};
@@ -395,8 +429,7 @@ void Command_Handle(void){
         }
         if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
             if (gnss_data.gnss_on) {
-                Command_SetDone("Error: Turn off GNSS first");
-                sms_send = false;
+                Command_SetDone("Error: Turn GNSS off first");
                 xSemaphoreGive(gnss_data.mutex);
                 return;
             }
@@ -490,7 +523,7 @@ void Command_Handle(void){
             strcpy(out, "AT mode active");
         }
     }
-    // GNSS easy
+    // GNSS wizard entry
     else if (strcmp(in, "/gnss") == 0) {
         if (!modem_ready) {
             Command_SetDone("Error: Modem is not ready");
@@ -499,8 +532,28 @@ void Command_Handle(void){
         gnss_mode = true;
         strcpy(out, "GNSS mode: on, off, info");
     }
-    
-    
+    // WiFi wizard entry (not fully implemented)
+    else if (strcmp(in, "/wifi") == 0) {
+        if (!modem_ready) {
+            Command_SetDone("Error: Modem is not ready");
+            return;
+        }
+        // Not that it cant do it its just a lot of draw for PSU
+        if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+            if (gnss_data.gnss_on) {
+                Command_SetDone("Error: Turn GNSS off first");
+                xSemaphoreGive(gnss_data.mutex);
+                return;
+            }
+            xSemaphoreGive(gnss_data.mutex);
+        }
+        wifi_mode = true;
+        strcpy(out, "WiFi mode: scan, connect");
+
+    }
+
+    // Error was default, if we set something else then it was a valid command with a response
+
     // Set cmd.buffer output and state
     if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
         strcpy(cmd_buffer.output, out);

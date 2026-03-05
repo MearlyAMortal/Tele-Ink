@@ -9,26 +9,14 @@
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 
+#define POLL_MS 100
 
 static TwoWire *ikey_i2c = nullptr;
 static uint8_t ikey_addr = 0x5F;
 static TaskHandle_t key_task = NULL;
-static QueueHandle_t key_queue = NULL;
 static SemaphoreHandle_t key_mutex = NULL;
 static volatile bool key_task_run = false;
-
 static int history_peek_idx = -1;
-
-#define POLL_MS 100
-
-// FD
-static bool handle_special_key(uint8_t &kc);
-static bool i2c_read_key(uint8_t &out);
-static void keyTask(void *pv);
-static void Keyboard_Start(void);
-static void Keyboard_Stop(void);
-static bool Keyboard_IsConnected(void);
-
 
 // Maps special keycodes to events
 static bool handle_special_key(uint8_t &kc) {
@@ -64,10 +52,11 @@ static bool handle_special_key(uint8_t &kc) {
     return false;
 }
 
+// Reads a single byte from the keyboard over I2C, returns false if no key or error
+// Cast the return as an int in case I2C returns negative for whatever reason
 static bool i2c_read_key(uint8_t &out) {
     if (!ikey_i2c || !key_mutex) return false;
     if (xSemaphoreTake(key_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        // Prepare kb
         ikey_i2c->beginTransmission(ikey_addr);
         // que one byte into tx buff from register ptr
         ikey_i2c->write(0x00);
@@ -80,7 +69,7 @@ static bool i2c_read_key(uint8_t &out) {
         xSemaphoreGive(key_mutex);
         if (ok && out != 0x00){
             return true;
-        } 
+        }
     }
     return false;
 }
@@ -97,19 +86,18 @@ static void keyTask(void *pv) {
 
     for (;;) {
         if (!key_task_run) {
-            DEV_Delay_ms(POLL_MS*1000);
+            DEV_Delay_ms(POLL_MS*10);
             continue;
         }
 
-        keycode = 0;
-
         // Read Keyboard data, false if 0x00 (no key) IDLE
+        keycode = 0;
         if (!i2c_read_key(keycode) ) {
             DEV_Delay_ms(POLL_MS);
             continue;
         }
 
-        // Key pressed
+        // Key pressed ATP
         SetLastActivityTick(); // Reset idle timer for display on any key press
 
         // Handle special key if mapped (exit sequential and return to base handling)
@@ -127,23 +115,42 @@ static void keyTask(void *pv) {
         sequential_mode = (current_page == PAGE_COMMAND);
 
         if (sequential_mode) { 
-            if (keycode == 0x1B) { // Esc (repurposing in progress)
-                /*
+            // Esc (replicates /exit)
+            if (keycode == 0x1B) {
+                if (!at_mode && !gnss_mode && !sms_read && !sms_send) {
+                    last = keycode;
+                    continue;
+                }
                 line_pos = 0;
                 line_buffer[0] = '\0';
-                sequential_mode = false;
-                sms_send = false;
-                sms_read = false;
-                sms_count = 0;
                 at_mode = false;
                 gnss_mode = false;
+                // responding derived from reading so go to read mode
+                if (sms_send && sms_read) {
+                    sms_send = false;
+                } else {
+                    sms_send = false;
+                    sms_read = false;
+                }
+                if (sms_read_all){
+                    sms_count = 0;
+                    sms_read_all = false;
+                }
+                // End all wifi avenues
+                wifi_mode = false;
+                if (wifi_scan) {
+                    // Stop scan
+                    wifi_scan = false;
+                }
+                if (wifi_connected) {
+                    // Disconnect
+                    wifi_connected = false;
+                }
                 last = keycode;
-                Display_ClearCommandHistory();
-                Display_Event_ShowHome(); // Default to home
-                */
                 continue;
             } 
-            if (keycode == 0x08 || keycode == 0x7F) { // Backspace/Delete
+            // Backspace/Delete
+            if (keycode == 0x08 || keycode == 0x7F) {
                 if (line_pos > 0) {
                     line_pos--;
                     line_buffer[line_pos] = '\0';
@@ -156,7 +163,8 @@ static void keyTask(void *pv) {
                 last = keycode;
                 continue;
             }
-            if (keycode == 0x0D) { // Enter
+            // Enter key sends command for processing
+            if (keycode == 0x0D) {
                 history_peek_idx = -1;
                 line_buffer[line_pos] = '\0';
                 if (line_pos != 0){
@@ -174,13 +182,10 @@ static void keyTask(void *pv) {
                         cmd_buffer.history_count++;
                         
                         strcpy(cmd_buffer.input, line_buffer);
-                        // Copy for history (linked list?)
-                        
-
                         xSemaphoreGive(cmd_buffer.mutex);
                     }
 
-                    Command_Handle(); // Takes cmd_buffer mutex internally
+                    Command_Handle(); // Takes cmd_buffer mutex internally ;)
 
                     // Add output to history after command completes
                     if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100))) {
@@ -209,8 +214,6 @@ static void keyTask(void *pv) {
                 last = keycode;
                 continue;
             }
-
-            
 
             // Arrow keys(only up and down for now)
             if (0xB5 == keycode || keycode == 0xB6){
@@ -248,8 +251,7 @@ static void keyTask(void *pv) {
                 continue;
             }
 
-
-            // Adds key char to queue
+            // Adds pressed key to line buffer and updates cmd_buffer input for display
             if (keycode >= 0x20 && keycode <= 0x7E) { // Printable ASCII
                 history_peek_idx = -1;
                 if (line_pos < CMD_BUFFER_SIZE - 1) {
@@ -267,12 +269,13 @@ static void keyTask(void *pv) {
                 }
             }
         }
-
+        // Update last keycode for debugging and polling delay to avoid spamming I2C
         last = keycode;
         DEV_Delay_ms(POLL_MS);
     }
 }
 
+// Returns true if keyboard is detected on I2C bus, false if not or error
 static bool Keyboard_IsConnected(void) {
     if (!ikey_i2c || !key_mutex) return false;
     bool connected = false;
@@ -286,39 +289,31 @@ static bool Keyboard_IsConnected(void) {
     return connected;
 }
 
-static void Keyboard_Start(void){
-    if (key_task) return;
-    if (Keyboard_IsConnected()) {
+// Start keyboard task with very high priority if key_task isnt running
+static void Keyboard_StartTask(void){
+    if (!key_task) {
         key_task_run = true;
         // Core 0, Priority 1
         xTaskCreatePinnedToCore(keyTask, "key", 4096, NULL, 1, &key_task, 0);
-    } else {
-        printf("Keyboard not connected!\r\n");
     }
 }
 
+// Initilize relavent DS and check if connected before starting task, returns true if task started successfully, false if not connected or error
 bool Keyboard_Init(TwoWire *i2cInstance, uint8_t i2cAddress){
     if (!i2cInstance) return false;
     ikey_i2c = i2cInstance;
     ikey_addr = i2cAddress;
     if (!key_mutex) key_mutex = xSemaphoreCreateMutex();
-    if (!key_queue) key_queue = xQueueCreate(256, sizeof(char));
-    Keyboard_Start();
+
+    if (!Keyboard_IsConnected()) {
+        printf("Keyboard not detected at I2C address 0x%02X.\r\n", ikey_addr);
+        return false;
+    }
+
+    Keyboard_StartTask();
     return true;
 }
 
-static void Keyboard_Stop(void) {
-    key_task_run = false;
-    if (key_task) {
-        vTaskDelete(key_task);
-        key_task = NULL;
-    }
-    if (key_queue) vQueueDelete(key_queue); key_queue = NULL;
-    if (key_mutex) vSemaphoreDelete(key_mutex); key_mutex = NULL;
-}
 
-bool Keyboard_GetChar(char *out, TickType_t wait) {
-    if (!out || !key_queue) return false;
-    return xQueueReceive(key_queue, out, wait) == pdTRUE;
-}
+
 

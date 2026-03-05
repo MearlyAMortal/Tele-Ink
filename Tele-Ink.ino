@@ -32,18 +32,10 @@ void setup() {
     // Keyboard
     uint8_t addr7 = KEYBOARD_I2C;
     Wire.begin(KEYBOARD_SDA_PIN, KEYBOARD_SCL_PIN);
-    if (!Keyboard_Init(&Wire, addr7)){
-        printf("Couldnt initlize keyboard!\r\n");
-    }
+    Keyboard_Init(&Wire, addr7);
     
-    // WiFi
-    //WiFi_StartScanner(120000);
-    //WiFi_ConnectBlocking(WIFI_SSID,WIFI_PASSWORD, 15000);
-    //WiFi_Init();
-
     // Starting page
     Display_Event_ShowHome();
-    //Display_Event_ShowIdle();
     printf("Setup complete!\r\n");
 
 }
