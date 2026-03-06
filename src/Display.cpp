@@ -18,9 +18,6 @@
 bool screen_on = false;
 PageType current_page = PAGE_NONE;
 PageType last_page = PAGE_NONE;
-bool wifi_mode = false;
-bool wifi_scan = false;
-bool wifi_connected = false;
 bool modem_ready = false;
 bool modem_net = false;
 bool modem_powered = false;
@@ -31,8 +28,10 @@ bool sms_read_all = false;
 int sms_count = 0;
 bool at_mode = false;
 bool gnss_mode = false;
+bool wifi_mode = false;
 CommandBuffer cmd_buffer = {0};
 GNSSData gnss_data = {0};
+WifiData wifi_data = {0};
 SignalData signal_data = {0};
 // Private
 // Screen
@@ -152,15 +151,26 @@ static void paintHomeScreen(void) {
         Paint_DrawString_EN(10, 100, "SMS: 0", &Font16, BLACK, WHITE);
     }
 
-    // WIFI
-    if (wifi_mode){
-        Paint_DrawString_EN(10, 120, "Wifi +", &Font16, BLACK, WHITE);
-        if (wifi_connected){
-            Paint_DrawString_EN(10, 120, "Wifi ++", &Font16, BLACK, WHITE);
+    // WiFi
+    if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+        if (wifi_data.wifi_on) {
+            Paint_DrawString_EN(10, 120, "WiFi +", &Font16, BLACK, WHITE);
+            Paint_DrawString_EN(15, 140, "Idle", &Font16, WHITE, BLACK);
+            if (wifi_data.wifi_connected) {
+                Paint_DrawString_EN(10, 120, "WiFi ++", &Font16, BLACK, WHITE);
+                Paint_DrawString_EN(15, 140, "Connected: SSID", &Font16, WHITE, BLACK);
+            } else if (wifi_data.wifi_scan) {
+                Paint_DrawString_EN(10, 120, "WiFi ++", &Font16, BLACK, WHITE);
+                Paint_DrawString_EN(15, 140, "Scanning Networks", &Font16, WHITE, BLACK);
+            } else if (wifi_data.wifi_host) {
+                Paint_DrawString_EN(10, 120, "WiFi ++", &Font16, BLACK, WHITE);
+                Paint_DrawString_EN(15, 140, "Hosting: SSID", &Font16, WHITE, BLACK);
+            }
+        } else {
+            Paint_DrawString_EN(10, 120, "WiFi -", &Font16, BLACK, WHITE);
         }
-    } else {
-        Paint_DrawString_EN(10, 120, "Wifi -", &Font16, BLACK, WHITE);
-    }
+        xSemaphoreGive(wifi_data.mutex);
+    } 
 
     // Parse signal type and corresponding strength
     if (xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
@@ -168,15 +178,18 @@ static void paintHomeScreen(void) {
         // find current network type and corresponding signal strength/quality
         // LTE (4G)
         if (signal_data.rsrq != 255 && signal_data.rsrp != 255) {
-            if (signal_data.rsrq >= 0 && signal_data.rsrq <= 12) {
+            if (signal_data.rsrq >= 0 && signal_data.rsrq <= 9) {
                 // poor signal
                 snprintf(result, sizeof(result), "4G LTE :(");
-            } else if (signal_data.rsrq > 12 && signal_data.rsrq <= 22) {
+            } else if (signal_data.rsrq >= 10 && signal_data.rsrq <= 19) {
                 // moderate signal
                 snprintf(result, sizeof(result), "4G LTE :|");
-            } else if (signal_data.rsrq > 22 && signal_data.rsrq <= 34) {
-                // excellent signal
+            } else if (signal_data.rsrq >= 20 && signal_data.rsrq <= 30) {
+                // good signal
                 snprintf(result, sizeof(result), "4G LTE :)");
+            } else if (signal_data.rsrq > 30) {
+                // excellent signal
+                snprintf(result, sizeof(result), "4G LTE :D");
             }
         } 
         // 3G fallback (UMTS/WCDMA)
@@ -191,8 +204,7 @@ static void paintHomeScreen(void) {
         else {
             snprintf(result, sizeof(result), "No Service");
         }
-        Paint_DrawString_EN((display_w/2) + 30 - (strlen(result) * Font16.Width), 8, result, &Font16, BLACK, WHITE);
-        //Paint_DrawString_EN(160, 10, "Version 0.2.4", &Font12, WHITE, BLACK);
+        Paint_DrawString_EN((display_w/2) + 30 - (strlen(result) * Font16.Width), 8, result, &Font16, WHITE, BLACK);
 
         xSemaphoreGive(signal_data.mutex);
     }
@@ -673,19 +685,30 @@ void SignalData_Reset(void) {
     }
 }
 
-// Reset all public modes back to default 
+// Reset all public modes back to default if modem is lost or reset
 void ResetGlobalModeState(void) {
+    // AT
     at_mode = false;
-    gnss_mode = false;
+    // SMS
     sms_send = false;
     sms_read = false;
+    sms_read_all = false;
+    sms_count = 0;
+    // GNSS
+    gnss_mode = false;
     if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         gnss_data.gnss_on = false;
         xSemaphoreGive(gnss_data.mutex);
     }
+    // Wifi
     wifi_mode = false;
-    wifi_connected = false;
-    wifi_scan = false;
+    if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        wifi_data.wifi_on = false;
+        wifi_data.wifi_connected = false;
+        wifi_data.wifi_scan = false;
+        wifi_data.wifi_host = false;
+        xSemaphoreGive(wifi_data.mutex);
+    }
 }
 
 // Display task
@@ -696,13 +719,24 @@ static void displayTask(void *pv) {
     idle_c[0] = 'A'; // Start at 'A' for idle character
 
     // Set signal to unkown values to start
+    // Mutex isnt created yet becuase this task starts before modemTask
     signal_data.rxlev = 99;
-    signal_data.ber = 99;
+    signal_data.ber = 99; 
     signal_data.rscp = 255;
     signal_data.ecno = 255;
     signal_data.rsrq = 255;
     signal_data.rsrp = 255;
 
+    // Set wifi to unkown values to start
+    // Mutex isnt created yet becuase this task starts before modemTask
+    wifi_data.wifi_on = false;
+    wifi_data.wifi_connected = false;
+    wifi_data.wifi_scan = false;
+    wifi_data.wifi_host = false;
+    wifi_data.wifi_ssid[0] = '\0';
+    wifi_data.wifi_pass[0] = '\0';
+
+    // Main loop, initilization finished ATP
     for (;;) {
         // Wait for event 100ms polling if none do partial update
         if (xQueueReceive(dispQueue, &evt, pdMS_TO_TICKS(POLL_MS)) == pdTRUE) {
@@ -728,7 +762,7 @@ static void displayTask(void *pv) {
                 case DISP_EVT_RING: ringing = true; break;
             }
 
-            // Check if we want to immediatly restart the loop if event is not significant
+            // Only update homescreen with external modem state changes 
             if (evt.type == DISP_EVT_MODEM_READY || evt.type == DISP_EVT_MODEM_NET || evt.type == DISP_EVT_MODEM_LOST
                 || evt.type == DISP_EVT_SMS_RECEIVED || evt.type == DISP_EVT_RING) {
                 if (current_page != PAGE_HOME) {

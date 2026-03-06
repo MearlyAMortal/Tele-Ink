@@ -80,22 +80,32 @@ typedef struct {
 
 extern CommandBuffer cmd_buffer;
 
-// Wifi
-extern bool wifi_mode;
-extern bool wifi_scan;
-extern bool wifi_connected;
 // modem
 extern bool modem_ready; // Modem is ready to recive data
 extern bool modem_net; // Modem has proved that it can respond and network status home or roaming (not literally on the network, this naming convention can be confusing)
 extern bool modem_powered; 
 extern uint8_t modem_mode;
-// Keyboard / command / modem
+extern int sms_count; 
+// Internal mode state for Keyboard / command / modem
 extern bool sms_send;
 extern bool sms_read;
 extern bool sms_read_all;
-extern int sms_count; 
 extern bool at_mode;
 extern bool gnss_mode;
+extern bool wifi_mode;
+
+// Wifi
+typedef struct {
+    bool wifi_on;
+    bool wifi_scan;
+    bool wifi_connected;
+    char ssid[32];
+    char password[64];
+    bool wifi_host;
+    // Add hostname etc for hosting capabilities in the future
+    SemaphoreHandle_t mutex;
+} WifiData;
+extern WifiData wifi_data;
 
 // GNSS
 typedef struct {

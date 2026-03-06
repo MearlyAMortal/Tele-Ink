@@ -115,9 +115,10 @@ static void keyTask(void *pv) {
         sequential_mode = (current_page == PAGE_COMMAND);
 
         if (sequential_mode) { 
-            // Esc (replicates /exit)
+            // Esc (replicates /exit) goes back one mode state if in a submode, otherwise goes back to base
+            // Pretty ugly becuase of massive amount of global variables
             if (keycode == 0x1B) {
-                if (!at_mode && !gnss_mode && !sms_read && !sms_send) {
+                if (!at_mode && !sms_read && !sms_send && !gnss_mode && !wifi_mode) {
                     last = keycode;
                     continue;
                 }
@@ -125,6 +126,7 @@ static void keyTask(void *pv) {
                 line_buffer[0] = '\0';
                 at_mode = false;
                 gnss_mode = false;
+                wifi_mode = false;
                 // responding derived from reading so go to read mode
                 if (sms_send && sms_read) {
                     sms_send = false;
@@ -132,20 +134,12 @@ static void keyTask(void *pv) {
                     sms_send = false;
                     sms_read = false;
                 }
+                // Get out of read all mode but keep sms_count if not in read all mode
                 if (sms_read_all){
                     sms_count = 0;
                     sms_read_all = false;
                 }
-                // End all wifi avenues
-                wifi_mode = false;
-                if (wifi_scan) {
-                    // Stop scan
-                    wifi_scan = false;
-                }
-                if (wifi_connected) {
-                    // Disconnect
-                    wifi_connected = false;
-                }
+                
                 last = keycode;
                 continue;
             } 

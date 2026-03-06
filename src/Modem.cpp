@@ -636,6 +636,8 @@ bool Modem_Init(HardwareSerial *serial, int rxPin, int txPin, int powerPin) {
     if (!gnss_data.mutex) gnss_data.mutex = xSemaphoreCreateMutex();
     // Mutex for signal data access
     if (!signal_data.mutex) signal_data.mutex = xSemaphoreCreateMutex();
+    // Mutex for wifi data access
+    if (!wifi_data.mutex) wifi_data.mutex = xSemaphoreCreateMutex();
     // Queue
     if (!modem_cmd_queue) modem_cmd_queue = xQueueCreate(4, sizeof(ModemCmd*));
     if (modemSerial) Modem_StartTask();
