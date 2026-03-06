@@ -338,10 +338,19 @@ void Command_Handle(void){
             Command_SetDone("Exiting WiFi mode");
             wifi_mode = false;
             // disconnect wifi and or scan maybe
-            wifi_connected = false;
-            wifi_scan = false; 
+            
             return;
         } 
+        if (strcmp(in, "stop") == 0) {
+            // stop the scan then update wifi data
+            if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+                wifi_data.wifi_scan = false;
+                wifi_data.wifi_connected = false;
+                //wifi_data.ssid[0] = '\0';
+                //wifi_data.password[0] = '\0';
+                xSemaphoreGive(wifi_data.mutex);
+            }
+        }
         if (strncmp(in, "scan", 4) == 0) {
             //
         }
@@ -538,6 +547,12 @@ void Command_Handle(void){
             Command_SetDone("Error: Modem is not ready");
             return;
         }
+        // STOP HERE IT AINT READY JIT
+        if (true) {
+            Command_SetDone("Error: WiFi not supported in this firmware version");
+            return;
+        }
+
         // Not that it cant do it its just a lot of draw for PSU
         if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
             if (gnss_data.gnss_on) {

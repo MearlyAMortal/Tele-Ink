@@ -730,11 +730,11 @@ static void displayTask(void *pv) {
     // Set wifi to unkown values to start
     // Mutex isnt created yet becuase this task starts before modemTask
     wifi_data.wifi_on = false;
-    wifi_data.wifi_connected = false;
     wifi_data.wifi_scan = false;
+    wifi_data.wifi_connected = false;
+    wifi_data.ssid[0] = '\0';
+    wifi_data.password[0] = '\0';
     wifi_data.wifi_host = false;
-    wifi_data.wifi_ssid[0] = '\0';
-    wifi_data.wifi_pass[0] = '\0';
 
     // Main loop, initilization finished ATP
     for (;;) {
