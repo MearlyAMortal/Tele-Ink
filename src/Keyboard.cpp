@@ -122,8 +122,8 @@ static void keyTask(void *pv) {
                     last = keycode;
                     continue;
                 }
-                line_pos = 0;
-                line_buffer[0] = '\0';
+                //line_pos = 0;
+                //line_buffer[0] = '\0';
                 at_mode = false;
                 gnss_mode = false;
                 wifi_mode = false;
@@ -304,6 +304,7 @@ bool Keyboard_Init(TwoWire *i2cInstance, uint8_t i2cAddress){
         return false;
     }
 
+    printf("Keyboard detected at I2C address 0x%02X. Starting task...\r\n", ikey_addr);
     Keyboard_StartTask();
     return true;
 }

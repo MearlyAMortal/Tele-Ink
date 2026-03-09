@@ -74,17 +74,19 @@ static int CountSmsMessages(const char* resp) {
     return count;
 }
 
-// Collect unread sms message idxs for later retrieval
-static int GetUnreadSmsIndices(const char* resp, int* ids, int max_ids) {
+// Collect unread sms message idxs for later retrieval user "ALL" filter to collect unread and read messages
+static int GetSmsIndices(const char* resp, const char* status_filter, int* ids, int max_ids) {
     int count = 0;
     const char* p = resp;
     while ((p = strstr(p, "+CMGL:")) != NULL && count < max_ids) {
         const char* status = strchr(p, ',');
-        if (status && strstr(status, "\"REC UNREAD\"")) {
-            p += 6;
-            while (*p == ' ') p++;
-            int idx = atoi(p);
-            ids[count++] = idx;
+        if (status) {
+            if (strcmp(status_filter, "ALL") == 0 || strstr(status, status_filter)) {
+                p += 6;
+                while (*p == ' ') p++;
+                int idx = atoi(p);
+                ids[count++] = idx;
+            }
         }
         p = strchr(p, '\n');
         if (!p) break;
@@ -93,12 +95,12 @@ static int GetUnreadSmsIndices(const char* resp, int* ids, int max_ids) {
 }
 
 // Make printable id response for display
-static void SetUnreadSmsNumbers(char* id_str, const int* ids, int um) {
-    for (int i = 0; i < um; i++) {
+static void SetSmsNumbers(char* id_str, const int* ids, int num) {
+    for (int i = 0; i < num; i++) {
         char buf[8];
         snprintf(buf, sizeof(buf), "%d", ids[i] + 1);
         strcat(id_str, buf);
-        if (i < um - 1) {
+        if (i < num - 1) {
             strcat(id_str, ",");
         }
     }
@@ -231,21 +233,40 @@ void Command_Handle(void){
                 p++;
             }
             
-            //TrimRight(number);
+            // Check if valid number and save globally for response or later sending
             if (Sms_IsValidNumber(number)) {
-                printf("Saving number: %s\r\n", number);
                 sms_number[0] = '\0';
+                printf("Saving number: %s\r\n", number);
                 strncpy(sms_number, number, sizeof(sms_number) - 1);
                 sms_number[sizeof(sms_number) - 1] = '\0';
             } 
             // Set output to message body only
-            // Skip the header
-            char *data = tmp + strlen("AT+CMGR=X +GMGR: ");
+            snprintf(cmd, sizeof(cmd), "AT+CMGR=%d +CMGR: ", idr);
+            char *data = tmp + strlen(cmd);
             while (*data == ' ') data++;
+            // skip the "REC UNREAD/READ" status at the start of the data
+            if (*data == '"') {
+                data++; // skip opening quote
+                while (*data && *data != '"') data++;
+                if (*data == '"') data++; // skip closing quote
+                if (*data == ',') data++; // skip comma after status
+                while (*data == ' ') data++;
+            }
+            // Remove trailing OK from message
+            TrimRight(data);
+            size_t len = strlen(data);
+            if (len >= 2) {
+                // Check for "OK" at the end (case-sensitive)
+                if ((len >= 2 && strcmp(data + len - 2, "OK") == 0)) {
+                    data[len - 2] = '\0';
+                    TrimRight(data);
+                }
+            }
+
             Command_SetDone(data);
         } else {
-            Command_SetDone("Error: No message ");
-        }   
+            Command_SetDone("Error: Invalid index");
+        }
         return;
     }
     else if (at_mode) {
@@ -400,8 +421,6 @@ void Command_Handle(void){
             } else {
                 strcpy(out, "Error: Modem is on");
             }
-            Modem_TogglePWK(1200);
-            strcpy(out, "Toggled pwk on modem on");
         } else if (strncmp(in, "/sim off", 8) == 0) {  
             if (modem_ready) {
                 Modem_TogglePWK(3000);
@@ -412,20 +431,22 @@ void Command_Handle(void){
             }
         } else if (strncmp(in, "/sim rst", 8) == 0) {  
             if (modem_ready) {
-                Modem_Restart();
                 ResetGlobalModeState();
+                Modem_Restart();
                 strcpy(out, "Restarted modem");
             } else {
                 strcpy(out, "Error: Modem is not ready");
             }
-            // Holds user for the entire restart process
-            strcpy(out, "Restarted modem");
         } 
-        else if (strncmp(in, "/sim net", 8) == 0 && modem_ready) {
-            char tmp[256] = {0};
-            Modem_SendAT("AT+CREG?", tmp, sizeof(tmp), 5000);
-            ReplaceControlChars(tmp);
-            strcpy(out, tmp);
+        else if (strncmp(in, "/sim net", 8) == 0) {
+            if (modem_ready) {
+                char tmp[256] = {0};
+                Modem_SendAT("AT+CREG?", tmp, sizeof(tmp), 5000);
+                ReplaceControlChars(tmp);
+                strcpy(out, tmp);
+            } else {
+                strcpy(out, "Error: Modem is not ready");
+            }
         } else {
             strcpy(out, "Error: Command Unrecognized");
         }
@@ -451,19 +472,25 @@ void Command_Handle(void){
             return;
         } 
         tmp[0] = '\0';
-        int m = 0; //msgs
+        int m = 0; //total msgs
         int um = 0; //unread msgs
         // Reading recivied messages
         if (strncmp(in, "/sms r", 6) == 0) {
             // All msgs on sim
             if (strncmp(in, "/sms ra", 7) == 0) {
                 Modem_SendAT ("AT+CMGL=\"ALL\"", tmp, sizeof(tmp), 5000);
-                m = CountSmsMessages(tmp);
-                snprintf(out, sizeof(out), "Total SMS stored on sim: %d", m);
+                int ids[10];
+                // Grabs REC UNREAD and REC READ 
+                m = GetSmsIndices(tmp, "ALL", ids, 10);
+                char id_str[64] = {0};
+                SetSmsNumbers(id_str, ids, m);
                 if (m > 0) {
                     sms_count = m; 
                     sms_read = true; 
                     sms_read_all = true;
+                    snprintf(out, sizeof(out), "Total: %d ID(s): %s", m, id_str);
+                } else {
+                    strcpy(out , "No SMS messages on SIM");
                 }
                 Command_SetDone(out);
                 return;
@@ -472,9 +499,9 @@ void Command_Handle(void){
             else if (strncmp(in, "/sms ru", 7) == 0) {
                 Modem_SendAT ("AT+CMGL=\"REC UNREAD\"", tmp, sizeof(tmp), 5000);
                 int ids[10];
-                um = GetUnreadSmsIndices(tmp, ids, 10);
+                um = GetSmsIndices(tmp, "\"REC UNREAD\"", ids, 10);
                 char id_str[64] = {0};
-                SetUnreadSmsNumbers(id_str, ids, um);
+                SetSmsNumbers(id_str, ids, um);
                 if (um > 0) {
                     sms_count = um; 
                     sms_read = true; 
