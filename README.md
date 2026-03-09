@@ -1,36 +1,43 @@
 # Tele-Ink
-## A FreeRTOS based 4GLTE/WiFi/GPS IoT device that utilizes a E-Ink display for low power
+## A FreeRTOS based 4GLTE/WiFi/GNSS IoT device that utilizes a E-Ink display for low power
 
 <img src="/examples/IMG_0247.JPG" alt="Alt Text" width="400" height="600">
 
 # Features
 1. Utilizes E-Ink display for low power/holding images while off
-2. USB-C Charging and 2500Mah internal battery 
-3. Full Qwerty keyboard with arrow keys and sym key
+2. USB-C 500Ma Charging and 2500Mah internal battery 
+3. Full Qwerty keyboard with arrow keys and fn/sym keys
 4. Hologram SIM for automatic network switching +46 Country code and 13 digit number
 5. Full Global Roaming 4g/3g/2g/LTE/GNSS/PPP/etc (no voice)
-6. WiFi is available for connection/hosting but commented out for now to save upload time.
-7. Can send/recive SMS messages and get local time and coordinate information.
-8. Can send raw AT commands and see full responses using command page.
-9. Idle animation similar to old VCR tape machines.
-10. Full control over hardware from command page.
+6. Service quality is parsed and interpreted to show signal type and quality
+7. WiFi is available for connection/hosting/scanning but commented out for now to save upload time.
+8. Can send/recive/respond/delete SMS messages directly from SIM.
+9. GNSS mode allows location data such as time, date, location, etc.
+10. Local time offset is calculated automatically using longitude from UTC not accounting for DST
+11. Can send raw AT commands and see full responses using command page.
+12. Command screen is encapsulated and dynamic so text will wrap and push elements up until there is room
+13. Idle animation similar to old VCR tape machines.
+14. Full control over hardware from command page.
+
+# FreeRTOS Task:        Core:  Priorety: Use:
+*  keyTask              0      1         Polls I2C and if special key, performs large operations else reads into cmd_buffer if in sequential
+*  displayTask          0      2         Consumes from dispQueue and operates the EPD (E-Paper) API using epd_mutex
+*  modemTask            1      2         Reads UART RX resp/URC and consumes from modem_cmd_queue and sends -> TX using modem_mutex
+*  modemBackgroundTask  1      4         Uses UART to get modem ready then polls status/GNSS/signal strength using modem_cmd_queue
 
 # Usage
 * You must wait ~20 seconds for modem coldstart + system recognition for AT
 * Sym+key can be used for major screen updates and or page changes
 * You can change screen page using sym+key (home h, idle i, command c)
 * Sleep/Wake button clears screen on sleep (sym+esc)
-* Home page shows time if GNSS=ON and dynamic relevant system information
-* GNSS info updates every 15s if gnss_mode=true or 45s if its false (gnss_mode != gnss_on)
-* Idle page has a VCR style box bouncing around on the edges of the screen
+* GNSS info updates every 15s in background if gnss_on just repaint to see new data on homepage
+* Idle page has a VCR style box bouncing around on the edges of the screen that will trigger if low activity
 * Command page causes keyboard to enter sequential mode for typing
-* Commands start with '/' char else echo input 
-* Command prompt corresponds to specifc mode you are currently in ($, AT, >, :)
-* Command modes include (Base $, at mode AT, sms write >, sms read :)
+* Command modes include (Base $, at mode AT, sms write >, sms read :, gnss GNSS:)
 * In SMS read mode you can use /s to send a message to the number of the last message read
-* Command modes can be exited using /exit
-* It will save state, history and text buffer unless you /clear or esc key
-* Command screen is encapsulated and dynamic so text will wrap and push elements up until there is room
+* GNSS mode requires "on" plus time for a fix, then repaint the homescreen or "info"
+* Command modes can be exited using /exit or esc key
+* It will save state, history and text buffer unless you /clear 
 * Queuing display events will cause a fullscreen refresh unless they are modem status changes not on the homescreen.
 * WARNING the epd api from waveshare requires 4Gray to be initlizied before fullscreen changes. (It currently only initilizes once at start) STABLE
 
