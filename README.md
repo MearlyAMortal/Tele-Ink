@@ -23,7 +23,7 @@
 ```
   Task:                 Core:  Priorety: Use:
 * keyTask               0      1         Polls I2C and if special key, performs large operations else reads into cmd_buffer if in sequential
-* displayTask           0      2         Consumes from dispQueue and operates the EPD (E-Paper) API using epd_mutex
+* displayTask           0      2         Consumes from dispQueue and operates the I2C EPD (E-Paper) API using epd_mutex 
 * modemTask             1      2         Reads UART RX resp/URC and consumes from modem_cmd_queue and sends -> TX using modem_mutex
 * modemBackgroundTask   1      4         Uses UART to get modem ready then polls status/GNSS/signal strength using modem_cmd_queue
 ```
