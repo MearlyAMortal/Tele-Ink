@@ -488,7 +488,7 @@ static void ModemBackgroundTask(void *pv) {
 // Handles status, signal quality, and GNSS polling. URC is still handled by main task
 static void Modem_StartBackgroundTask(void) {
     if (!modem_background_task_handle) {
-        xTaskCreatePinnedToCore(ModemBackgroundTask, "modemBackground", 4096, NULL, 4, &modem_background_task_handle, 1);
+        xTaskCreatePinnedToCore(ModemBackgroundTask, "modemBackground", 4096, NULL, 1, &modem_background_task_handle, 1);
     }
 }
 
@@ -617,8 +617,9 @@ static void modemTask(void *pv) {
 }
 
 static void Modem_StartTask(void) {
-    // Core 1, Priority 2
-    xTaskCreatePinnedToCore(modemTask, "modem", 8192, NULL, 2, &modem_task_handle, 1);
+    if (!modem_task_handle) {
+        xTaskCreatePinnedToCore(modemTask, "modem", 8192, NULL, 4, &modem_task_handle, 1);
+    }
 }
 
 // Create Sem/Queue and start modemTask

@@ -287,8 +287,7 @@ static bool Keyboard_IsConnected(void) {
 static void Keyboard_StartTask(void){
     if (!key_task) {
         key_task_run = true;
-        // Core 0, Priority 1
-        xTaskCreatePinnedToCore(keyTask, "key", 4096, NULL, 1, &key_task, 0);
+        xTaskCreatePinnedToCore(keyTask, "key", 4096, NULL, 3, &key_task, 0);
     }
 }
 

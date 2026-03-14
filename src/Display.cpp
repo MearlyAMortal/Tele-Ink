@@ -827,7 +827,6 @@ static void displayTask(void *pv) {
 static void Display_StartTask(void) {
     if (!display_task_handle) {
         screen_on = true;
-        //Core 0, Priority 2
         xTaskCreatePinnedToCore(displayTask, "display", 8192, NULL, 2, &display_task_handle, 0);
     }
 }
