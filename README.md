@@ -2,6 +2,7 @@
 ## A FreeRTOS based 4GLTE/WiFi/GNSS IoT device that utilizes a E-Ink display for low power
 
 <img src="/examples/IMG_0247.JPG" alt="Alt Text" width="400" height="600">
+<img src="/examples/IMG_0749.jpg" alt="Alt Text" width="400" height="250">
 
 # Features
 1. Utilizes E-Ink display for low power/holding images while off
@@ -22,10 +23,10 @@
 # FreeRTOS Task Overview
 ```
   Task:                 Core:  Priorety: Use:
-* keyTask               0      1         Polls I2C and if special key, performs large operations else reads into cmd_buffer if in sequential
+* keyTask               0      3         Polls I2C and if special key, performs large operations else reads into cmd_buffer if in sequential
 * displayTask           0      2         Consumes from dispQueue and operates the I2C EPD (E-Paper) API using epd_mutex 
-* modemTask             1      2         Reads UART RX resp/URC and consumes from modem_cmd_queue and sends -> TX using modem_mutex
-* modemBackgroundTask   1      4         Uses UART to get modem ready then polls status/GNSS/signal strength using modem_cmd_queue
+* modemTask             1      4         Reads UART RX resp/URC and consumes from modem_cmd_queue and sends -> TX using modem_mutex
+* modemBackgroundTask   1      1         Uses UART to get modem ready then polls status/GNSS/signal strength using modem_cmd_queue
 ```
 # Usage
 * You must wait ~20 seconds for modem coldstart + system recognition for AT
