@@ -197,21 +197,32 @@ bool Modem_SendSMS(const char *number, const char *message, uint32_t timeout_ms)
     return ok;
 }
 
+// Handles any URC lines that the main modem task intercepts
 static bool Modem_HandleURC(const char *line) {
-    if (strcmp(line, "OK") == 0) {
-        return true;
-    }
-    else if (strncmp(line, "+CMTI:", 6) == 0) {
-        printf("SMS recieved! Index: %s\r\n", line + 12);
+    if (strncmp(line, "+CMTI:", 6) == 0) {
+        printf("SMS Recieved! Index: %s\r\n", line + 12);
         DisplayEvent e = { .type = DISP_EVT_SMS_RECEIVED, .payload = NULL};
         Display_PostEvent(&e, 0);
-        DEV_Delay_ms(250);
         return true;
     } 
+    else if (strncmp(line, "+CREG:", 6) == 0) {
+        if (strstr(line, "0,5") || strstr(line, "0,1")) {
+            printf("Network registered: %s\r\n", line);
+        } else {
+            printf("Network lost: %s\r\n", line);
+        }
+        return true;
+    }
     else {
         printf("Modem URC unhandled: %s\r\n", line);
     }
     return false;
+}
+
+// Checks if line is a URC we care about, returns true if handled, false if not
+static bool Is_URC(const char *line) {
+    return strncmp(line, "+CMTI:", 6) == 0 ||
+           strncmp(line, "+CREG:", 6) == 0;
 }
 
 // Returns true if state changed. update internal based on phyisical state (mostly helpful for communication between displayTask)
@@ -221,7 +232,7 @@ bool Modem_CheckStatus(void) {
         modem_serial_begun = false;
         DisplayEvent e = { .type = DISP_EVT_MODEM_LOST, .payload = NULL};
         Display_PostEvent(&e, 0);
-        DEV_Delay_ms(250);
+        DEV_Delay_ms(10);
         return true;
     }
     // Begin serial if lost after initilizing it in modemTask
@@ -250,7 +261,7 @@ bool Modem_CheckStatus(void) {
                     if (strstr(resp, "0,5") || strstr(resp, "0,1")) {
                         DisplayEvent e = {.type = DISP_EVT_MODEM_NET, .payload = NULL};
                         Display_PostEvent(&e, 0);
-                        DEV_Delay_ms(250);
+                        DEV_Delay_ms(10);
                         xSemaphoreGive(modem_mutex);
                         return true;
                     }
@@ -267,7 +278,7 @@ bool Modem_CheckStatus(void) {
                     if (strstr(resp, "OK")) {
                         DisplayEvent e = {.type = DISP_EVT_MODEM_READY, .payload = NULL};
                         Display_PostEvent(&e, 0);
-                        DEV_Delay_ms(250);
+                        DEV_Delay_ms(10);
                         xSemaphoreGive(modem_mutex);
                         return true;                        
                     }
@@ -287,7 +298,7 @@ bool Modem_CheckStatus(void) {
         if (strstr(resp, "0,5") || strstr(resp, "0,1")) {
             DisplayEvent e = {.type = DISP_EVT_MODEM_NET, .payload = NULL};
             Display_PostEvent(&e, 0);
-            DEV_Delay_ms(250);
+            DEV_Delay_ms(10);
             return true;
         }
     }
@@ -298,7 +309,7 @@ bool Modem_CheckStatus(void) {
         if (strstr(resp, "OK") == NULL) {
             DisplayEvent e = { .type = DISP_EVT_MODEM_LOST, .payload = NULL};
             Display_PostEvent(&e, 0);
-            DEV_Delay_ms(250);
+            DEV_Delay_ms(10);
             return true;
         }
     }
@@ -493,7 +504,6 @@ static void Modem_StartBackgroundTask(void) {
 }
 
 
-
 // Modem background task to handle command queue and URCs
 // ready/powered/net State is external in display and handled by display events
 // display events are called from here so give some time for the display task to process them and update modem state 
@@ -557,10 +567,11 @@ static void modemTask(void *pv) {
                     if (strncmp(current_cmd->cmd, "AT+CMGS", 7) == 0) {
                         strncat(current_cmd->resp, ">\n", sizeof(current_cmd->resp) - strlen(current_cmd->resp) - 1);
                         xSemaphoreGive(current_cmd->done_sem);
-                        xSemaphoreGive(modem_mutex);
+                        //xSemaphoreGive(modem_mutex);
                         current_cmd = NULL;
                         idx = 0;
-                        continue;
+                        //continue;
+                        break;
                     }
                 }
                 if (idx < sizeof(line) - 1) line[idx++] = (char)c;
@@ -571,27 +582,20 @@ static void modemTask(void *pv) {
                     // DEBUG
                     if (line[0] != '\0') printf("Modem RX: %s\r\n", line);
                     if (idx > 0) {
-                        if (current_cmd) {
+                        if (Is_URC(line)) {
+                            Modem_HandleURC(line);
+                        } else if (current_cmd) {
                             // append to response transcript
                             strncat(current_cmd->resp, line, sizeof(current_cmd->resp) - strlen(current_cmd->resp) - 2);
                             strncat(current_cmd->resp, "\n", sizeof(current_cmd->resp) - strlen(current_cmd->resp) - 1);
-                            if (current_cmd->waitForOK) {
-                                if (strcmp(line, "OK") == 0 || strcmp(line, "ERROR") == 0 ||
-                                    strstr(line, "+CME ERROR") || strstr(line, "+CMS ERROR")) {
-                                    xSemaphoreGive(current_cmd->done_sem);
-                                    current_cmd = NULL;
-                                }
-                            } else {
+                            if (strcmp(line, "OK") == 0 || strcmp(line, "ERROR") == 0 ||
+                                strstr(line, "+CME ERROR") || strstr(line, "+CMS ERROR")) {
                                 xSemaphoreGive(current_cmd->done_sem);
                                 current_cmd = NULL;
                             }
-                        } else {
-                            // unsolicited result code / URC
-                            Modem_HandleURC(line);
                         }
+                        idx = 0;
                     }
-
-                    idx = 0;
                 }
             }
             xSemaphoreGive(modem_mutex);
@@ -616,6 +620,8 @@ static void modemTask(void *pv) {
     }
 }
 
+
+// Start the main modem task if not already running which starts the background task after waiting for coldstart
 static void Modem_StartTask(void) {
     if (!modem_task_handle) {
         xTaskCreatePinnedToCore(modemTask, "modem", 8192, NULL, 4, &modem_task_handle, 1);
@@ -640,8 +646,7 @@ bool Modem_Init(HardwareSerial *serial, int rxPin, int txPin, int powerPin) {
     if (!gnss_data.mutex) gnss_data.mutex = xSemaphoreCreateMutex();
     // Mutex for signal data access
     if (!signal_data.mutex) signal_data.mutex = xSemaphoreCreateMutex();
-    // Mutex for wifi data access
-    if (!wifi_data.mutex) wifi_data.mutex = xSemaphoreCreateMutex();
+    
     // Queue
     if (!modem_cmd_queue) modem_cmd_queue = xQueueCreate(8, sizeof(ModemCmd*));
     // Start serial

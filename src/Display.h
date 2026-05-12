@@ -30,6 +30,7 @@ typedef enum {
     PAGE_HOME,
     PAGE_IDLE,
     PAGE_COMMAND,
+    PAGE_DYNAMIC_WINDOW,
 } PageType;
 
 extern PageType current_page;
@@ -44,12 +45,12 @@ typedef enum {
     DISP_EVT_SHOW_HOME, 
     DISP_EVT_SHOW_COMMAND,
     DISP_EVT_SHOW_IDLE,
+    DISP_EVT_SHOW_DYNAMIC_WINDOW,
     DISP_EVT_MODEM_POWERED, // Modem
     DISP_EVT_MODEM_READY,
     DISP_EVT_MODEM_NET,
     DISP_EVT_MODEM_LOST,
     DISP_EVT_SMS_RECEIVED,
-    DISP_EVT_RING,
     DISP_EVT_CUSTOM_MSG,
 } DisplayEventType;
 
@@ -60,8 +61,9 @@ typedef struct {
 
 // Command buffer for display
 #define CMD_BUFFER_SIZE 256
-#define CMD_HISTORY_LINES 10
-// IDLE(display) -> TYPING(keyboard) -> PROCESSING(command) -> DONE(command) -> IDLE(display) 
+#define CMD_HISTORY_LINES 16
+#define CMD_INPUT_HISTORY_LINES 16
+// IDLE(display)(init) => TYPING(keyboard) -> PROCESSING(command) -> DONE(command) -> IDLE(keyboard) -> TYPING(keyboard)
 typedef enum {
     CMD_STATE_IDLE = 0,
     CMD_STATE_TYPING,
@@ -72,8 +74,12 @@ typedef enum {
 typedef struct {
     char input[CMD_BUFFER_SIZE];
     char output[CMD_BUFFER_SIZE];
+    // For displaying past input/output
     char history[CMD_HISTORY_LINES][CMD_BUFFER_SIZE];
     int history_count;
+    // For arrow key movement in command menu
+    char input_history[CMD_INPUT_HISTORY_LINES][CMD_BUFFER_SIZE];
+    int input_history_count;
     CommandState state;
     SemaphoreHandle_t mutex;
 } CommandBuffer;
@@ -86,6 +92,8 @@ extern bool modem_net; // Modem has proved that it can respond and network statu
 extern bool modem_powered; 
 extern uint8_t modem_mode;
 extern int sms_count; 
+extern int sms_unread_count; // Actual new incoming message count via URC
+extern int sms_ids[10];
 // Internal mode state for Keyboard / command / modem
 extern bool sms_send;
 extern bool sms_read;
@@ -140,6 +148,7 @@ void Display_Event_Sleep(void);
 void Display_Event_ShowHome(void);
 void Display_Event_ShowIdle(void);
 void Display_Event_ShowCommand(void);
+void Display_Event_ShowDynamicWindow(void);
 // Update internal display ds
 void Display_ClearCommandHistory(void);
 void SetLastActivityTick(void);

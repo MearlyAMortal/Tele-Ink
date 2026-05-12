@@ -4,7 +4,7 @@
 #include "src/Display.h"
 #include "src/Modem.h"
 #include "src/Keyboard.h"
-//#include "src/ESP32_WiFi.h"
+#include "src/ESP32_WiFi.h"
 #include "ImageData.h"
 #include "credentials.h"
 #include <stdlib.h>

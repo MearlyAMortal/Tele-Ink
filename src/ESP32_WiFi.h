@@ -2,11 +2,11 @@
 * | File      	:   Wifi.h
 * | Author      :   Logan Puntous
 * | Function    :   Multiple functionality from public calls.
-* |                 Can create WifiTask for scanning
-* | Info        :
+* |                 Can create FreeRTOS WifiTask's for scanning and hosting, and can connect/disconnect from wifi networks.
+* | Info        :   All public functions return bool so command processer can update internal state 
 *----------------
 * |	This version:   V0.0.1
-* | Date        :   2025-12-18
+* | Date        :   2026-3-14
 * | Info        :
 #
 ******************************************************************************/
@@ -15,10 +15,12 @@
 
 #include "DEV_Config.h"
 
-void WiFi_StartScanner(uint32_t interval_ms = 60000);
+bool WiFi_StartScanner(uint32_t interval_ms = 60000);
+bool WiFi_StopScanner(void);
 bool WiFi_ConnectBlocking(const char *ssid, const char *pass, uint32_t timeout_ms = 15000);
-void WiFi_StopScanner(void);
-
+bool WiFi_Disconnect(void);
+bool WiFi_StartHost(const char *ssid, const char *pass);
+bool WiFi_StopHost(void);
 
 
 #endif // ESP32_WIFI_H

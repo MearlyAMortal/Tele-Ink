@@ -26,6 +26,8 @@ bool sms_send = false;
 bool sms_read = false;
 bool sms_read_all = false;
 int sms_count = 0;
+int sms_unread_count = 0;
+int sms_ids[10] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
 bool at_mode = false;
 bool gnss_mode = false;
 bool wifi_mode = false;
@@ -52,8 +54,6 @@ static TickType_t last_activity_tick = 0;
 static uint32_t idle_page_tick_count = 0;
 static bool page_change_evt = false;
 static uint32_t partial_update_count = 0;
-// Modem
-static bool ringing = false;
 // Paint
 static char idle_c[2] = {0};
 
@@ -109,11 +109,14 @@ static void paintHomeScreen(void) {
     if (at_mode) {
         snprintf(buf, sizeof(buf), "CMD Mode: AT", at_mode);
     }
-    else if (sms_read || sms_count) {
+    else if (sms_read || sms_send) {
         snprintf(buf, sizeof(buf), "CMD Mode: SMS", at_mode);
     }
     else if (gnss_mode) {
         snprintf(buf, sizeof(buf), "CMD Mode: GNSS", at_mode);
+    }
+    else if (wifi_mode) {
+        snprintf(buf, sizeof(buf), "CMD Mode: WiFi", at_mode);
     }
     else {
         snprintf(buf, sizeof(buf), "CMD Mode: Base", at_mode);
@@ -143,9 +146,9 @@ static void paintHomeScreen(void) {
     }
     
     // SMS (temporary)
-    if (sms_count > 0 && !sms_read) {
+    if (sms_unread_count > 0) {
         char buf[32];
-        snprintf(buf, sizeof(buf), "SMS New: %d", sms_count);
+        snprintf(buf, sizeof(buf), "SMS New: %d", sms_unread_count);
         Paint_DrawString_EN(10, 100, buf, &Font16, BLACK, WHITE);
     } else {
         Paint_DrawString_EN(10, 100, "SMS: 0", &Font16, BLACK, WHITE);
@@ -161,7 +164,7 @@ static void paintHomeScreen(void) {
                 Paint_DrawString_EN(15, 140, "Connected: SSID", &Font16, WHITE, BLACK);
             } else if (wifi_data.wifi_scan) {
                 Paint_DrawString_EN(10, 120, "WiFi ++", &Font16, BLACK, WHITE);
-                Paint_DrawString_EN(15, 140, "Scanning Networks", &Font16, WHITE, BLACK);
+                Paint_DrawString_EN(15, 140, "Scanning...", &Font16, WHITE, BLACK);
             } else if (wifi_data.wifi_host) {
                 Paint_DrawString_EN(10, 120, "WiFi ++", &Font16, BLACK, WHITE);
                 Paint_DrawString_EN(15, 140, "Hosting: SSID", &Font16, WHITE, BLACK);
@@ -170,7 +173,9 @@ static void paintHomeScreen(void) {
             Paint_DrawString_EN(10, 120, "WiFi -", &Font16, BLACK, WHITE);
         }
         xSemaphoreGive(wifi_data.mutex);
-    } 
+    } else {
+        Paint_DrawString_EN(10, 120, "WiFi ?", &Font16, BLACK, WHITE);
+    }
 
     // Parse signal type and corresponding strength
     if (xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
@@ -207,7 +212,7 @@ static void paintHomeScreen(void) {
         Paint_DrawString_EN((display_w/2) + 30 - (strlen(result) * Font16.Width), 8, result, &Font16, WHITE, BLACK);
 
         xSemaphoreGive(signal_data.mutex);
-    }
+    } 
 
     // GNSS data (must be last)
     if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
@@ -267,6 +272,14 @@ static void paintBlankScreen(void) {
     paintConfigureForMode(4);
     Paint_Clear(WHITE);
 }
+static void paintDynamicScreen(void) {
+    paintConfigureForMode(4);
+    Paint_Clear(WHITE);
+    Paint_DrawLine(1, 20, display_w-1, 20, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
+    Paint_DrawString_EN(5, 5, "Dynamic Window", &Font16, WHITE, BLACK);
+    Paint_DrawString_EN(5+(Font12.Width * 16), 5, "123", &Font12, WHITE, BLACK);
+
+}
 static void paintBootScreen(void) {
     paintConfigureForMode(4);
     Paint_Clear(WHITE);
@@ -281,7 +294,7 @@ static void paintBootScreen(void) {
     Paint_DrawCircle(105, 95, 20, WHITE, DOT_PIXEL_1X1, DRAW_FILL_FULL);
     Paint_DrawLine(85, 95, 125, 95, BLACK, DOT_PIXEL_1X1, LINE_STYLE_DOTTED);
     Paint_DrawLine(105, 75, 105, 115, BLACK, DOT_PIXEL_1X1, LINE_STYLE_DOTTED);
-    Paint_DrawString_EN(10, 5, "Tele-Ink v0.2.4", &Font16, BLACK, WHITE);
+    Paint_DrawString_EN(10, 5, "Tele-Ink v0.3.0", &Font16, BLACK, WHITE);
     Paint_DrawString_EN(10, 20, "By: Logan Puntous", &Font12, WHITE, BLACK);
     Paint_DrawNum(10, 33, 123456789, &Font12, BLACK, WHITE);
     Paint_DrawNum(10, 50, 987654321, &Font16, WHITE, BLACK);
@@ -296,6 +309,7 @@ static void paintCurrentPage(void) {
         case PAGE_HOME:    paintHomeScreen(); break;
         case PAGE_IDLE:    paintBlankScreen(); break;
         case PAGE_COMMAND: paintCommandScreen(); break;
+        case PAGE_DYNAMIC_WINDOW: paintDynamicScreen(); break;
         default: break;
     }
 }
@@ -366,10 +380,15 @@ void Display_Event_ShowCommand(void) {
     DisplayEvent e = { .type = DISP_EVT_SHOW_COMMAND, .payload = NULL};
     Display_PostEvent(&e, 0);
 }
-void Display_Event_ShowIdle(void){
+void Display_Event_ShowIdle(void) {
     DisplayEvent e = { .type = DISP_EVT_SHOW_IDLE, .payload = NULL};
     Display_PostEvent(&e, 0);
 }
+void Display_Event_ShowDynamicWindow(void) {
+    DisplayEvent e = { .type = DISP_EVT_SHOW_DYNAMIC_WINDOW, .payload = NULL};
+    Display_PostEvent(&e, 0);
+}
+
 
 // Public call to clear the shared command history buffer in display task
 void Display_ClearCommandHistory(void) {
@@ -377,6 +396,7 @@ void Display_ClearCommandHistory(void) {
         cmd_buffer.history_count = 0;
         for (int i = 0; i < CMD_HISTORY_LINES; i++) {
             cmd_buffer.history[i][0] = '\0';
+            cmd_buffer.input_history[i][0] = '\0';
         }
         xSemaphoreGive(cmd_buffer.mutex);
     }
@@ -447,14 +467,16 @@ static void HandlePartialUpdate_command(void) {
     // Draw current input with respective cursor for mode
     int input_y = 250;
     char display_line[CMD_BUFFER_SIZE + 2];
-    if (sms_send){
+    if (sms_send) {
         snprintf(display_line, sizeof(display_line), "> %s_", current_input);
-    } else if (sms_read){
+    } else if (sms_read) {
         snprintf(display_line, sizeof(display_line), "SMS: %s_", current_input);
-    } else if (at_mode){
+    } else if (at_mode) {
         snprintf(display_line, sizeof(display_line), "AT%s_", current_input);
-    } else if (gnss_mode){
+    } else if (gnss_mode) {
         snprintf(display_line, sizeof(display_line), "GNSS: %s_", current_input);
+    } else if (wifi_mode) {
+        snprintf(display_line, sizeof(display_line), "WiFi: %s_", current_input);
     } else {
         snprintf(display_line, sizeof(display_line), "$ %s_", current_input);
     }
@@ -694,6 +716,7 @@ void ResetGlobalModeState(void) {
     sms_read = false;
     sms_read_all = false;
     sms_count = 0;
+    sms_unread_count = 0;
     // GNSS
     gnss_mode = false;
     if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
@@ -711,30 +734,12 @@ void ResetGlobalModeState(void) {
     }
 }
 
-// Display task
+// Display task consumes display events from queue to update internal state and update screen or polls for partial updates and idle timeout to show idle screen, runs indefinitely 
 static void displayTask(void *pv) {
     (void)pv;
     DisplayEvent evt;
     last_activity_tick = xTaskGetTickCount();
     idle_c[0] = 'A'; // Start at 'A' for idle character
-
-    // Set signal to unkown values to start
-    // Mutex isnt created yet becuase this task starts before modemTask
-    signal_data.rxlev = 99;
-    signal_data.ber = 99; 
-    signal_data.rscp = 255;
-    signal_data.ecno = 255;
-    signal_data.rsrq = 255;
-    signal_data.rsrp = 255;
-
-    // Set wifi to unkown values to start
-    // Mutex isnt created yet becuase this task starts before modemTask
-    wifi_data.wifi_on = false;
-    wifi_data.wifi_scan = false;
-    wifi_data.wifi_connected = false;
-    wifi_data.ssid[0] = '\0';
-    wifi_data.password[0] = '\0';
-    wifi_data.wifi_host = false;
 
     // Main loop, initilization finished ATP
     for (;;) {
@@ -754,17 +759,17 @@ static void displayTask(void *pv) {
                 case DISP_EVT_SHOW_HOME: setPage(PAGE_HOME); page_change_evt = true; break;
                 case DISP_EVT_SHOW_COMMAND: setPage(PAGE_COMMAND); page_change_evt = true; break;
                 case DISP_EVT_SHOW_IDLE: setPage(PAGE_IDLE); page_change_evt = true; break;
+                case DISP_EVT_SHOW_DYNAMIC_WINDOW: setPage(PAGE_DYNAMIC_WINDOW); page_change_evt = true; break;
                 case DISP_EVT_MODEM_POWERED: modem_powered = true; break;
                 case DISP_EVT_MODEM_READY: modem_ready = true; modem_powered = true; break;
                 case DISP_EVT_MODEM_NET: modem_ready = true; modem_powered = true; modem_net = true; break;
                 case DISP_EVT_MODEM_LOST: modem_ready = false; modem_net = false; SignalData_Reset(); ResetGlobalModeState(); break;
-                case DISP_EVT_SMS_RECEIVED: ++sms_count; break;
-                case DISP_EVT_RING: ringing = true; break;
+                case DISP_EVT_SMS_RECEIVED: sms_unread_count++; break;
             }
 
             // Only update homescreen with external modem state changes 
             if (evt.type == DISP_EVT_MODEM_READY || evt.type == DISP_EVT_MODEM_NET || evt.type == DISP_EVT_MODEM_LOST
-                || evt.type == DISP_EVT_SMS_RECEIVED || evt.type == DISP_EVT_RING) {
+                || evt.type == DISP_EVT_SMS_RECEIVED) {
                 if (current_page != PAGE_HOME) {
                     xSemaphoreGive(epd_mutex);
                     continue;
@@ -790,10 +795,10 @@ static void displayTask(void *pv) {
         }
 
         
-        //Partial update every 500ms (internal epd limit for 1gray_display) or repaint for ghosting
+        //Partial update every 500ms (internal epd limit for 1gray_display) or repaint for ghosting every ~2 minutes
         if (GRAY_MODE == 1 && screen_on) {
             if (xSemaphoreTake(epd_mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
-                if (partial_update_count >= 60) {
+                if (partial_update_count >= 120) {
                     if (current_page == PAGE_IDLE) {
                         Display_UpdateFullScreen();
                     }
@@ -814,8 +819,8 @@ static void displayTask(void *pv) {
             ++idle_timeout_count;
         }
 
-        // No activity show idle page
-        if (screen_on && idle_timeout_count >= 3 && current_page != PAGE_IDLE) {
+        // No activity show idle page if on page other than home
+        if (screen_on && idle_timeout_count >= 3 && current_page != PAGE_IDLE && current_page != PAGE_HOME) {
             printf("Switching to idle page due to inactivity.\r\n");
             Display_Event_ShowIdle();
             idle_timeout_count = 0; 
@@ -849,18 +854,40 @@ void Display_Init(void) {
     cmd_buffer.input[0] = '\0';
     cmd_buffer.output[0] = '\0';
     cmd_buffer.history_count = 0;
+    cmd_buffer.input_history_count = 0;
     cmd_buffer.state = CMD_STATE_IDLE;
-
-    if (GRAY_MODE != 4){
-        printf("ERROR: Expected GRAY_MODE 4\r\n");
-        return;
-    } 
     
+    // Set signal to unkown values to start
+    // Mutex isnt created yet becuase this task starts before modemTask
+    signal_data.rxlev = 99;
+    signal_data.ber = 99; 
+    signal_data.rscp = 255;
+    signal_data.ecno = 255;
+    signal_data.rsrq = 255;
+    signal_data.rsrp = 255;
+
+    // Create mutex and Set wifi to unkown values to start
+    if (!wifi_data.mutex) {
+        wifi_data.mutex = xSemaphoreCreateMutex();
+        if (!wifi_data.mutex) {
+            printf("ERROR: Failed to create wifi_data mutex in display!\r\n");
+            return;
+        }
+    }
+    wifi_data.wifi_on = false;
+    wifi_data.wifi_scan = false;
+    wifi_data.wifi_connected = false;
+    wifi_data.ssid[0] = '\0';
+    wifi_data.password[0] = '\0';
+    wifi_data.wifi_host = false;
+
+
     // Init EPD
     EPD_3IN7_4Gray_Init();
     DEV_Delay_ms(200);
+    GRAY_MODE = 4;
 
-
+    // Malloc memory for canvass
     image_size4 = getImageSizeForMode(4);
     image_size1 = getImageSizeForMode(1);
     if ((image_buf4 = (UBYTE *)malloc(image_size4)) == NULL) {
@@ -873,7 +900,7 @@ void Display_Init(void) {
         free(image_buf1);
         return;
     }
-    // Create two empty canvass so paint APIs are ready to use
+    // Initilize two empty canvass so paint APIs are ready to use
     Paint_NewImage(image_buf4, EPD_3IN7_WIDTH, EPD_3IN7_HEIGHT, 270, WHITE);
     Paint_NewImage(image_buf1, EPD_3IN7_WIDTH, EPD_3IN7_HEIGHT, 270, WHITE);
     display_w = EPD_3IN7_HEIGHT;
