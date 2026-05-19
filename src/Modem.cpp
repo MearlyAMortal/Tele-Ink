@@ -60,7 +60,7 @@ void Modem_Restart(void) {
     printf("Modem restarted.\r\n");
 }
 
-// Writes raw data to modem while mutex is taken, returns true if all bytes written successfully before timeout, false if error or timeout
+// Internal function to write raw data to modem serial with mutex and timeout, returns true if all bytes written, false if error or timeout
 static bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeout_ms) {
     if (!modemSerial || !modem_ready) return false;
     if (!data || len == 0) return true;
@@ -75,8 +75,7 @@ static bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeout_ms)
     return false;
 }
 
-// Wait for the queued command to finish and return result before continuing in the main task
-// Uses malloc and free which can cause fragmentation but should be fine since commands are not frequent
+// queue
 static ModemCmd* Modem_QueueWaitOnly(uint32_t timeout_ms) {
     ModemCmd *w = (ModemCmd*)malloc(sizeof(ModemCmd));
     if (!w) return NULL;
@@ -84,9 +83,9 @@ static ModemCmd* Modem_QueueWaitOnly(uint32_t timeout_ms) {
     w->cmd[0] = '\0';
     w->resp[0] = '\0';
     w->timeout_ms = timeout_ms;
-    w->waitForOK = true;
     w->noTx = true;
     w->done_sem = xSemaphoreCreateBinary();
+
     if (!w->done_sem) { free(w); return NULL; }
     if (xQueueSend(modem_cmd_queue, &w, pdMS_TO_TICKS(500)) != pdTRUE) {
         vSemaphoreDelete(w->done_sem);
@@ -96,34 +95,59 @@ static ModemCmd* Modem_QueueWaitOnly(uint32_t timeout_ms) {
     return w;
 }
 
-// Wait until response is recived then signal to sender and free the wait struct. Returns true if OK received, false if error or timeout
-static bool Modem_WaitAndFree(ModemCmd *w, uint32_t timeout_ms) {
+// Waits for modem response and determines success based on presence of OK or optional prefix and absence of ERROR, then frees wait struct. Returns true if successful response received, false if error or timeout
+static bool Modem_WaitFinalize(ModemCmd *w, char *out, size_t out_len, uint32_t timeout_ms) {
     if (!w) return false;
     bool ok = false;
+
     if (xSemaphoreTake(w->done_sem, pdMS_TO_TICKS(timeout_ms + 500)) == pdTRUE) {
-        ok = (strstr(w->resp, "OK") != NULL) &&
-             (strstr(w->resp, "ERROR") == NULL) &&
-             (strstr(w->resp, "+CME ERROR") == NULL) &&
-             (strstr(w->resp, "+CMS ERROR") == NULL);
+        if (out && out_len > 0) {
+            strncpy(out, w->resp, out_len - 1);
+            out[out_len - 1] = '\0';
+        }
+
+        if (w->match_prefix[0] != '\0') {
+            ok = (strstr(w->resp, w->match_prefix) != NULL) &&
+                 (strstr(w->resp, "ERROR") == NULL) &&
+                 (strstr(w->resp, "+CME ERROR") == NULL) &&
+                 (strstr(w->resp, "+CMS ERROR") == NULL);
+        } else {
+            ok = (strstr(w->resp, "OK") != NULL || strchr(w->resp, '>') != NULL) &&
+                 (strstr(w->resp, "ERROR") == NULL) &&
+                 (strstr(w->resp, "+CME ERROR") == NULL) &&
+                 (strstr(w->resp, "+CMS ERROR") == NULL);
+        }
     }
+
     vSemaphoreDelete(w->done_sem);
     free(w);
     return ok;
 }
 
-// Sends AT command request to modem_queue and waits for response. (safe)
-bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeout_ms) {
+// Sends AT command request to modem_queue and waits for OK response unless provided with desired prefix to indicate completion. 
+bool Modem_SendAT(const char *cmd, const char *prefix, char *resp, size_t resp_len, uint32_t timeout_ms) {
     if (!modemSerial || !cmd || !resp || resp_len == 0) return false;
-    ModemCmd *r = (ModemCmd*)malloc(sizeof(ModemCmd)); // Heap
+    ModemCmd *r = (ModemCmd*)malloc(sizeof(ModemCmd));
     if (!r) return false;
-    strncpy(r->cmd, cmd, sizeof(r->cmd)-1); 
-    r->cmd[sizeof(r->cmd)-1]=0;
+
+    memset(r, 0, sizeof(*r));
+    strncpy(r->cmd, cmd, sizeof(r->cmd)-1);
+    //r->cmd[sizeof(r->cmd)-1]=0;
     r->done_sem = xSemaphoreCreateBinary();
     r->timeout_ms = timeout_ms;
-    r->resp[0] = '\0';
-    r->waitForOK = true;
+    //r->resp[0] = '\0';
     r->noTx = false;
     r->start_tick = 0;
+
+    if (prefix && prefix[0]) {
+        strncpy(r->match_prefix, prefix, sizeof(r->match_prefix) - 1);
+        r->match_prefix[sizeof(r->match_prefix) - 1] = '\0';
+    }
+
+    if (!r->done_sem) {
+        free(r);
+        return false;
+    }
 
     // enqueue request (wait briefly)
     if (modem_cmd_queue == NULL || xQueueSend(modem_cmd_queue, &r, pdMS_TO_TICKS(2000)) != pdTRUE) {
@@ -132,22 +156,7 @@ bool Modem_SendAT(const char *cmd, char *resp, size_t resp_len, uint32_t timeout
         return false;
     }
 
-    // wait for response (task will give the semaphore)
-    bool ok = false;
-    if (xSemaphoreTake(r->done_sem, pdMS_TO_TICKS(timeout_ms + 500)) == pdTRUE) {
-        // copy to caller buffer
-        strncpy(resp, r->resp, resp_len-1);
-        resp[resp_len-1] = '\0';
-        // Check for actual OK (or > for SMS prompt)
-        ok = (strstr(resp, "OK") != NULL || strchr(resp, '>') != NULL) &&
-             (strstr(resp, "ERROR") == NULL) &&
-             (strstr(resp, "+CME ERROR") == NULL) &&
-             (strstr(resp, "+CMS ERROR") == NULL);  
-    }
-
-    vSemaphoreDelete(r->done_sem);
-    free(r);
-    return ok;
+    return Modem_WaitFinalize(r, resp, resp_len, timeout_ms);
 }
 
 // Returns true if modem mode was set or already in that mode, false if error
@@ -156,7 +165,7 @@ bool Modem_SetCheckMode(uint8_t mode) {
     if (mode == modem_mode) return true;
 
     char tmp[32] = {0};
-    if (!Modem_SendAT("AT+CMGF=1", tmp, sizeof(tmp), 2000)) {
+    if (!Modem_SendAT("AT+CMGF=1", NULL, tmp, sizeof(tmp), 2000)) {
         printf("SetCheckMode: CMGF failed\r\n");
         return false;
     }
@@ -172,7 +181,7 @@ bool Modem_SendSMS(const char *number, const char *message, uint32_t timeout_ms)
     char cmgs[96] = {0};
     char resp[32] = {0};
     snprintf(cmgs, sizeof(cmgs), "AT+CMGS=\"%s\"", number);
-    Modem_SendAT(cmgs, resp, sizeof(resp), timeout_ms);
+    Modem_SendAT(cmgs, NULL, resp, sizeof(resp), timeout_ms);
     if (strchr(resp, '>') == NULL) {
         printf("SMS: no > prompt\r\n");
         return false;
@@ -193,8 +202,141 @@ bool Modem_SendSMS(const char *number, const char *message, uint32_t timeout_ms)
         return false;
     }
     // Wait for response and free wait struct
-    bool ok = Modem_WaitAndFree(w, timeout_ms);
-    return ok;
+    //bool ok = Modem_WaitAndFree(w, timeout_ms);
+    //bool ok = Modem_WaitFinalize(w, NULL, 0, timeout_ms);
+    return Modem_WaitFinalize(w, NULL, 0, timeout_ms);
+}
+
+// Parses HTTP action response for status code and content length, returns true if successfully parsed, false if not
+static bool Modem_ParseHttpAction(const char *resp, int *method, int *status, int *length) {
+    if (!resp || !method || !status || !length) return false;
+
+    const char *line = strstr(resp, "+HTTPACTION:");
+    if (!line) return false;
+
+    return sscanf(line, "+HTTPACTION: %d,%d,%d", method, status, length) == 3;
+}
+
+// Extracts body from HTTPREAD response and removes any leading/trailing whitespace and OK. Returns true if successfully extracted, false if not
+static bool Modem_ExtractHttpBody(char *resp) {
+    if (!resp) return false;
+
+    char *header = strstr(resp, "+HTTPREAD:");
+    if (!header) return false;
+
+    char *body = strchr(header, '\n');
+    if (!body) return false;
+    body++;
+
+    while (*body == '\r' || *body == '\n') body++;
+
+    char *ok = strstr(body, "\nOK");
+    if (!ok) ok = strstr(body, "\r\nOK");
+    if (ok) *ok = '\0';
+
+    size_t len = strlen(body);
+    while (len > 0 && (body[len - 1] == '\r' || body[len - 1] == '\n')) {
+        body[--len] = '\0';
+    }
+
+    memmove(resp, body, len + 1);
+    return true;
+}
+
+// Handles HTTP GET and POST for api calls such as weather and time. Returns true if OK received, false if error or timeout.
+bool Modem_SendHttpRequest(const ModemHttpRequest *request, ModemHttpResponse *response) {
+    if (!request || !response) return false;
+    // NOT IMPLEMENTED POST
+    if (request->method == MODEM_HTTP_POST) {
+        printf("aint gonna do it\r\n");
+        return false;
+    }
+
+    int action_method = 0;
+    int action_len = 0;
+    char url_cmd[512] = {0};
+    
+    // Initilize http service
+    char tmp[256] = {0};
+    response->status_code = 0;
+    response->body[0] = '\0';
+
+    if (!Modem_SendAT("AT+HTTPINIT", NULL, tmp, sizeof(tmp), 5000)) {
+        printf("HTTP: HTTPINIT failed\r\n");
+        return false;
+    }
+
+
+    // Set CID to 1 (preconfigured APN)
+    if (!Modem_SendAT("AT+HTTPPARA=\"CID\",1", NULL, tmp, sizeof(tmp), 5000)) {
+        printf("HTTP: HTTPPARA CID failed\r\n");
+        goto fail;
+    }
+
+    // Set ssl to 1 for https if the first 5 chars of url are https
+    if (strncmp(request->url, "https", 5) == 0) {
+        printf("WE AINT DOING SSL\r\n");
+        goto fail;
+        /*
+        if (!Modem_SendAT("AT+HTTPPARA=\"HTTPSREDIRECT\",1", NULL, tmp, sizeof(tmp), 5000)) {
+            printf("HTTP: HTTPPARA SSL failed\r\n");
+            goto fail;
+        }
+            */
+    } else {
+        /*
+        if (!Modem_SendAT("AT+HTTPPARA=\"HTTPSREDIRECT\",0", NULL, tmp, sizeof(tmp), 5000)) {
+            printf("HTTP: HTTPPARA SSL disable failed\r\n");
+            goto fail;
+        }
+            */
+    }
+
+    // Set URL
+    snprintf(url_cmd, sizeof(url_cmd), "AT+HTTPPARA=\"URL\",\"%s\"", request->url);
+    if (!Modem_SendAT(url_cmd, NULL, tmp, sizeof(tmp), 5000)) {
+        printf("HTTP: HTTPPARA URL failed\r\n");
+        goto fail;   
+    }
+
+    // Start action based on method
+    if (request->method == MODEM_HTTP_GET) {
+        // Start GET action and wait for +HTTPACTION response with status code and content length
+        if (!Modem_SendAT("AT+HTTPACTION=0", "+HTTPACTION:", tmp, sizeof(tmp), 30000)) {
+            printf("HTTP: HTTPACTION failed\r\n");
+            goto fail;
+        }
+    } else {
+        printf("HTTP: Unsupported method\r\n");
+        goto fail;
+    }
+    
+
+    if (!Modem_ParseHttpAction(tmp, &action_method, &response->status_code, &action_len)) {
+        printf("HTTP: Failed to parse +HTTPACTION response\r\n");
+        goto fail;
+    }
+
+    if (action_len <= 0) {
+        printf("HTTP: No content to read\r\n");
+        goto fail;
+    }
+
+    if (!Modem_SendAT("AT+HTTPREAD", NULL, response->body, sizeof(response->body), 10000)) {
+        printf("HTTP: HTTPREAD failed\r\n");
+        goto fail;
+    }
+
+    if (!Modem_ExtractHttpBody(response->body)) {
+        printf("HTTP: Failed to extract HTTP body\r\n");
+        goto fail;
+    }
+
+    Modem_SendAT("AT+HTTPTERM", NULL, tmp, sizeof(tmp), 5000);
+    return true;
+fail:
+    Modem_SendAT("AT+HTTPTERM", NULL, tmp, sizeof(tmp), 5000);
+    return false;
 }
 
 // Handles any URC lines that the main modem task intercepts
@@ -213,6 +355,10 @@ static bool Modem_HandleURC(const char *line) {
         }
         return true;
     }
+    else if (strncmp(line, "+CGPS:", 6) == 0) {
+        printf("GNSS URC: %s\r\n", line);
+        return true;
+    }
     else {
         printf("Modem URC unhandled: %s\r\n", line);
     }
@@ -222,7 +368,15 @@ static bool Modem_HandleURC(const char *line) {
 // Checks if line is a URC we care about, returns true if handled, false if not
 static bool Is_URC(const char *line) {
     return strncmp(line, "+CMTI:", 6) == 0 ||
-           strncmp(line, "+CREG:", 6) == 0;
+           strncmp(line, "+CREG:", 6) == 0 ||
+           strncmp(line, "+CGPS:", 6) == 0;
+}
+
+// wait until modem task is finshed processing all commands in the queue to avoid racing with commands in progress and causing false modem lost events. Should only be used before status checks in modem task.
+static void HaltUntilEmptyProcessor() {
+    while (uxQueueMessagesWaiting(modem_cmd_queue) > 0 || current_cmd != NULL) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
 }
 
 // Returns true if state changed. update internal based on phyisical state (mostly helpful for communication between displayTask)
@@ -232,7 +386,7 @@ bool Modem_CheckStatus(void) {
         modem_serial_begun = false;
         DisplayEvent e = { .type = DISP_EVT_MODEM_LOST, .payload = NULL};
         Display_PostEvent(&e, 0);
-        DEV_Delay_ms(10);
+        DEV_Delay_ms(100);
         return true;
     }
     // Begin serial if lost after initilizing it in modemTask
@@ -252,6 +406,7 @@ bool Modem_CheckStatus(void) {
         int idx = 0;
         start = millis();
         if (modem_mutex && xSemaphoreTake(modem_mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+            modemSerial->flush();
             modemSerial->print("AT+CREG?\r\n");
             while (millis() - start < 1000 && idx < sizeof(resp) - 1) {
                 if (modemSerial->available()) {
@@ -261,13 +416,17 @@ bool Modem_CheckStatus(void) {
                     if (strstr(resp, "0,5") || strstr(resp, "0,1")) {
                         DisplayEvent e = {.type = DISP_EVT_MODEM_NET, .payload = NULL};
                         Display_PostEvent(&e, 0);
-                        DEV_Delay_ms(10);
+                        DEV_Delay_ms(100);
                         xSemaphoreGive(modem_mutex);
                         return true;
                     }
                 }
             }
             // No registration but check AT
+            resp[0] = '\0';
+            idx = 0;
+            start = millis();
+            modemSerial->flush();
             modemSerial->print("AT\r\n");
             // Read response with timeout
             while (millis() - start < 1000 && idx < sizeof(resp) - 1) {
@@ -278,38 +437,41 @@ bool Modem_CheckStatus(void) {
                     if (strstr(resp, "OK")) {
                         DisplayEvent e = {.type = DISP_EVT_MODEM_READY, .payload = NULL};
                         Display_PostEvent(&e, 0);
-                        DEV_Delay_ms(10);
+                        DEV_Delay_ms(100);
                         xSemaphoreGive(modem_mutex);
                         return true;                        
                     }
                 }
             }
+            modemSerial->flush();
             xSemaphoreGive(modem_mutex);
         } else {
             printf("Modem_CheckStatus: failed to take modem_mutex for status check (timeout)\r\n");
             DEV_Delay_ms(250);
             return false;
         }
+        // Still modem not ready
+        return false;
     }
     // Modem is allready ready at ths point
     if (!modem_net){
         char resp[64] = {0};
-        Modem_SendAT("AT+CREG?", resp, sizeof(resp), 2000);
+        Modem_SendAT("AT+CREG?", NULL, resp, sizeof(resp), 2000);
         if (strstr(resp, "0,5") || strstr(resp, "0,1")) {
             DisplayEvent e = {.type = DISP_EVT_MODEM_NET, .payload = NULL};
             Display_PostEvent(&e, 0);
-            DEV_Delay_ms(10);
+            DEV_Delay_ms(100);
             return true;
         }
     }
     // Assume registration is fine check AT periodically to update internal state if modem is lost
     if (modem_ready && modem_net) {
         char resp[32] = {0};
-        Modem_SendAT("AT", resp, sizeof(resp), 2000);
+        Modem_SendAT("AT", NULL, resp, sizeof(resp), 1000);
         if (strstr(resp, "OK") == NULL) {
             DisplayEvent e = { .type = DISP_EVT_MODEM_LOST, .payload = NULL};
             Display_PostEvent(&e, 0);
-            DEV_Delay_ms(10);
+            DEV_Delay_ms(100);
             return true;
         }
     }
@@ -348,8 +510,12 @@ void GNSS_ToOneLinerAndUpdate(const char *input, char *output, size_t out_size) 
     // Parse the fields
     int n = sscanf(input, "%15[^,],%c,%15[^,],%c,%6[^,],%9[^,],%7[^,],%7[^,]",
         lat, &ns, lon, &ew, date, time, alt, spd);
-    if (is_empty_gnss(input) || n < 8) {
-        snprintf(output, out_size, "Error: Failed to fix or parse");
+    if (is_empty_gnss(input)) {
+        snprintf(output, out_size, "Error: Failed to get fix");
+        return;
+    }
+    if (n != 8) {
+        snprintf(output, out_size, "Error: Failed to parse %d", 8-n);
         return;
     }
     double lat_dd = nmea_to_decimal(lat, ns);
@@ -403,13 +569,14 @@ void GNSS_ToOneLinerAndUpdate(const char *input, char *output, size_t out_size) 
     // Requires user to repaint if they want current data rather than spamming fullscreen updates 
 }
 
-// Parses +CESQ response, updates global signal_data with mutex, returns true if parsed and updated successfully, false if error
+// Parses +CESQ response, updates global signal_data with mutex after reseting values in case of fallback, returns true if parsed and updated successfully, false if error
 static bool CESQ_ParseAndUpdate(const char *input) {
     uint8_t rxl, ber, rscp, ecno, rsrq, rsrp;
     if (sscanf(input, "%hhu,%hhu,%hhu,%hhu,%hhu,%hhu", &rxl, &ber, &rscp ,&ecno, &rsrq, &rsrp) != 6) {
         return false;
     }
-    if (xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+    SignalData_Reset();
+    if (xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         signal_data.rxlev = rxl;
         signal_data.ber = ber;
         signal_data.rscp = rscp;
@@ -425,6 +592,32 @@ static bool CESQ_ParseAndUpdate(const char *input) {
 }
 
 
+static void Background_GetPollRates(int &status_ms, int &cesq_ms, int &gnss_ms) {
+    if (!status_ms || !cesq_ms || !gnss_ms) return;
+    if (xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        status_ms = 30000 / int(signal_data.poll_rate);
+        cesq_ms = 120000 / int(signal_data.poll_rate);
+        xSemaphoreGive(signal_data.mutex);
+    } else {
+        printf("Background_GetPollRates: failed to take background_poll_rate_mutex\r\n");
+    }
+    if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        if (gnss_data.poll_rate == POLL_RATE_HIGH) {
+            gnss_ms = 7000;
+        } else if (gnss_data.poll_rate == POLL_RATE_MEDIUM) {
+            gnss_ms = 18000;
+        } else {
+            gnss_ms = 55000;
+        }
+        xSemaphoreGive(gnss_data.mutex);
+    } else {
+        printf("Background_GetPollRates: failed to take gnss_data mutex\r\n");
+    }
+}
+
+
+
+
 // Handles modem status checking, +CESQ polling, and GNSS polling. URC is still handled by main task (not time sensitive)
 // Use task tick count for correct delay times on each specifc background job
 // Only blocking when modem_ready is false so re ready the modem for the main task
@@ -438,13 +631,22 @@ static void ModemBackgroundTask(void *pv) {
     TickType_t last_gnss_call = xTaskGetTickCount();
     TickType_t now = 0;
 
+    int poll_rate_gnss_ms = 15000;
+    int poll_rate_cesq_ms = 60000;
+    int poll_rate_status_ms = 15000;
+
     for (;;) {
         now = xTaskGetTickCount();
-        // Status handling if enough time has passed since last check (10s)
+
+        // Status handling if enough time has passed since last check (15s)
         // Status check can be high blocking for modemTask but want responsive system diagnosis
-        if (now - last_status_check >= pdMS_TO_TICKS(10000)) {
+        if (now - last_status_check >= pdMS_TO_TICKS(poll_rate_status_ms)) {
+            Background_GetPollRates(poll_rate_status_ms, poll_rate_cesq_ms, poll_rate_gnss_ms);
             if (Modem_CheckStatus()) {
                 printf("Modem status changed!\r\n");
+                // reset cesq and gnss timers to avoid spamming commands immediately on status change
+                last_cesq_call = now;
+                last_gnss_call = now;
             } 
             last_status_check = now;
         }
@@ -453,9 +655,9 @@ static void ModemBackgroundTask(void *pv) {
             DEV_Delay_ms(1000);
             continue;
         }
-        // CESQ handling if enough time has passed since last check (30s)
-        if (now - last_cesq_call >= pdMS_TO_TICKS(30000)) {
-            if (Modem_SendAT("AT+CESQ", resp, sizeof(resp), 5000)) {
+        // CESQ handling if enough time has passed since last check (60s)
+        if (now - last_cesq_call >= pdMS_TO_TICKS(poll_rate_cesq_ms)) {
+            if (Modem_SendAT("AT+CESQ", NULL, resp, sizeof(resp), 5000)) {
                 ReplaceControlChars(resp);
                 char *data = strstr(resp, "+CESQ:");
                 if (data) {
@@ -473,13 +675,13 @@ static void ModemBackgroundTask(void *pv) {
             memset(resp, 0, sizeof(resp));
         }
         // GNSS handling if enought time has passed since last check and GNSS is on.
-        if (now - last_gnss_call >= pdMS_TO_TICKS(15000)) {
+        if (now - last_gnss_call >= pdMS_TO_TICKS(poll_rate_gnss_ms)) {
             if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
                 gnss = gnss_data.gnss_on;
                 xSemaphoreGive(gnss_data.mutex);
             }
             if (gnss && modem_ready) {
-                if (Modem_SendAT("AT+CGPSINFO", resp, sizeof(resp), 5000)) {
+                if (Modem_SendAT("AT+CGPSINFO", NULL, resp, sizeof(resp), 5000)) {
                     ReplaceControlChars(resp);
                     char *data = resp + strlen("AT+CGPSINFO +CGPSINFO: ");
                     while (*data == ' ') data++;
@@ -562,15 +764,13 @@ static void modemTask(void *pv) {
                 int c = modemSerial->read();
                 if (c < 0) break;
                 // If we're waiting for OK and we see '>', send ready AT+CMGS
-                if (current_cmd && current_cmd->waitForOK && c == '>') {
+                if (current_cmd && c == '>') {
                     // Only treat as SMS prompt if the command sms
                     if (strncmp(current_cmd->cmd, "AT+CMGS", 7) == 0) {
                         strncat(current_cmd->resp, ">\n", sizeof(current_cmd->resp) - strlen(current_cmd->resp) - 1);
                         xSemaphoreGive(current_cmd->done_sem);
-                        //xSemaphoreGive(modem_mutex);
                         current_cmd = NULL;
                         idx = 0;
-                        //continue;
                         break;
                     }
                 }
@@ -582,16 +782,36 @@ static void modemTask(void *pv) {
                     // DEBUG
                     if (line[0] != '\0') printf("Modem RX: %s\r\n", line);
                     if (idx > 0) {
-                        if (Is_URC(line)) {
-                            Modem_HandleURC(line);
-                        } else if (current_cmd) {
+                        // Check if line matches current command prefix, if so append to response and check for OK/ERROR to finish command
+                        if (current_cmd && current_cmd->match_prefix[0] != '\0' && strncmp(line, current_cmd->match_prefix, strlen(current_cmd->match_prefix)) == 0) {
                             // append to response transcript
                             strncat(current_cmd->resp, line, sizeof(current_cmd->resp) - strlen(current_cmd->resp) - 2);
                             strncat(current_cmd->resp, "\n", sizeof(current_cmd->resp) - strlen(current_cmd->resp) - 1);
-                            if (strcmp(line, "OK") == 0 || strcmp(line, "ERROR") == 0 ||
-                                strstr(line, "+CME ERROR") || strstr(line, "+CMS ERROR")) {
-                                xSemaphoreGive(current_cmd->done_sem);
-                                current_cmd = NULL;
+                            xSemaphoreGive(current_cmd->done_sem);
+                            current_cmd = NULL;
+                        }
+                        // Check if line is URC we care about, if so handle it and don't append to command response
+                        else if (Is_URC(line)) {
+                            Modem_HandleURC(line);
+                        } 
+                        // Otherwise if we have a pending command, append to response and check for OK/ERROR to finish command
+                        else if (current_cmd) {
+                            // append to response transcript
+                            strncat(current_cmd->resp, line, sizeof(current_cmd->resp) - strlen(current_cmd->resp) - 2);
+                            strncat(current_cmd->resp, "\n", sizeof(current_cmd->resp) - strlen(current_cmd->resp) - 1);
+                            if (current_cmd->match_prefix[0] != '\0') {
+                                // prefix-based command: only fail on explicit modem errors
+                                if (strcmp(line, "ERROR") == 0 || strstr(line, "+CME ERROR") || strstr(line, "+CMS ERROR")) {
+                                    xSemaphoreGive(current_cmd->done_sem);
+                                    current_cmd = NULL;
+                                }
+                            } 
+                            else {
+                                // normal AT command: finish on OK or explicit error
+                                if (strcmp(line, "OK") == 0 || strcmp(line, "ERROR") == 0 || strstr(line, "+CME ERROR") || strstr(line, "+CMS ERROR")) {
+                                    xSemaphoreGive(current_cmd->done_sem);
+                                    current_cmd = NULL;
+                                }
                             }
                         }
                         idx = 0;

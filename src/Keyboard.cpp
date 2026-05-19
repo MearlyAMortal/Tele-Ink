@@ -9,12 +9,12 @@
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 
-#define POLL_MS 100
+#define POLL_MS 80
 
 static TwoWire *ikey_i2c = nullptr;
 static uint8_t ikey_addr = 0x5F;
 static TaskHandle_t key_task = NULL;
-static SemaphoreHandle_t key_mutex = NULL;
+static SemaphoreHandle_t i2c_mutex = NULL;
 static volatile bool key_connected = false;
 static int history_peek_idx = -1;
 
@@ -58,8 +58,8 @@ static void handle_special_key(uint8_t &kc) {
 // Reads a single byte from the keyboard over I2C, returns false if no key or error
 // Cast the return as an int in case I2C returns negative for whatever reason
 static bool i2c_read_key(uint8_t &out) {
-    if (!ikey_i2c || !key_mutex) return false;
-    if (xSemaphoreTake(key_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    if (!ikey_i2c || !i2c_mutex) return false;
+    if (xSemaphoreTake(i2c_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         ikey_i2c->beginTransmission(ikey_addr);
         // que one byte into tx buff from register ptr
         ikey_i2c->write(0x00);
@@ -69,7 +69,7 @@ static bool i2c_read_key(uint8_t &out) {
         bool ok = (tx == 0) && (req == 1);
         if (ok) out = ikey_i2c->read();
 
-        xSemaphoreGive(key_mutex);
+        xSemaphoreGive(i2c_mutex);
         if (ok && out != 0x00){
             return true;
         }
@@ -79,15 +79,15 @@ static bool i2c_read_key(uint8_t &out) {
 
 // Returns true if keyboard is detected on I2C bus, false if not or error
 static bool Keyboard_IsConnected(void) {
-    if (!ikey_i2c || !key_mutex) return false;
+    if (!ikey_i2c || !i2c_mutex) return false;
     bool connected = false;
-    if (xSemaphoreTake(key_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (xSemaphoreTake(i2c_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         ikey_i2c->beginTransmission(ikey_addr);
         if (ikey_i2c->endTransmission() == 0) {
             connected = true;
-            printf("Keyboard connected on I2C: 0x%02X", ikey_addr);
+            printf("Keyboard connected on I2C: 0x%02X\r\n", ikey_addr);
         }
-        xSemaphoreGive(key_mutex);
+        xSemaphoreGive(i2c_mutex);
     }
     return connected;
 }
@@ -130,13 +130,14 @@ static void keyTask(void *pv) {
         if (sequential_mode) { 
             // Esc (replicates /exit) goes back one mode state if in a submode, otherwise goes back to base
             if (keycode == 0x1B) {
-                if (!at_mode && !sms_read && !sms_send && !gnss_mode && !wifi_mode) {
+                if (!at_mode && !sms_read && !sms_send && !gnss_mode ) {//&& !wifi_mode) {
                     continue;
                 }
                 
                 at_mode = false;
                 gnss_mode = false;
-                wifi_mode = false;
+                //wifi_mode = false;
+                http_mode = false;
                 // If exiting from response return to sms_read mode with original state
                 if (sms_send && sms_read) {
                     sms_send = false;
@@ -166,12 +167,14 @@ static void keyTask(void *pv) {
             if (keycode == 0x0D) {
                 history_peek_idx = -1;
                 line_buffer[line_pos] = '\0';
+                printf("Command entered: %s\r\n", line_buffer);
                 if (line_pos != 0){
                     // Update history BEFORE processing command
                     if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                         if (cmd_buffer.history_count >= CMD_HISTORY_LINES) {
                             for (int i = 0; i < CMD_HISTORY_LINES - 1; i++) {
-                                strcpy(cmd_buffer.history[i], cmd_buffer.history[i + 1]);
+                                //strcpy(cmd_buffer.history[i], cmd_buffer.history[i + 1]);
+                                memmove(cmd_buffer.history[i], cmd_buffer.history[i + 1], CMD_BUFFER_SIZE);
                             }
                             cmd_buffer.history_count = CMD_HISTORY_LINES - 1;
                         }
@@ -181,7 +184,8 @@ static void keyTask(void *pv) {
                         // input recall history for navigation using arrow keys
                         if (cmd_buffer.input_history_count >= CMD_INPUT_HISTORY_LINES) {
                             for (int i = 0; i < CMD_INPUT_HISTORY_LINES - 1; i++) {
-                                strcpy(cmd_buffer.input_history[i], cmd_buffer.input_history[i + 1]);
+                                //strcpy(cmd_buffer.input_history[i], cmd_buffer.input_history[i + 1]);
+                                memmove(cmd_buffer.input_history[i], cmd_buffer.input_history[i + 1], CMD_BUFFER_SIZE);
                             }
                             cmd_buffer.input_history_count = CMD_INPUT_HISTORY_LINES - 1;
                         }
@@ -191,11 +195,14 @@ static void keyTask(void *pv) {
                         // Place line_buffer into the command_buffer.input so command processor can handle
                         strcpy(cmd_buffer.input, line_buffer);
                         xSemaphoreGive(cmd_buffer.mutex);
+                    } else {
+                        printf("Error: Cant take CMD mutex to update history and input\r\n");
                     }
 
                     // Takes cmd_buffer mutex internally ;)
                     // Sets CMD_STATE to processing and done internally once finished
                     Command_Handle();
+
 
                     // Add output to history after command completes
                     if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -209,8 +216,12 @@ static void keyTask(void *pv) {
                             }
                             strcpy(cmd_buffer.history[cmd_buffer.history_count], cmd_buffer.output);
                             cmd_buffer.history_count++;
+                        } else {
+                            printf("ERROR: State not done after command_handle and or output empty\r\n");
                         }
                         xSemaphoreGive(cmd_buffer.mutex);
+                    }  else {
+                        printf("Error: Cant take CMD mutex to update history and input\r\n");
                     }
                 }
                 
@@ -221,6 +232,8 @@ static void keyTask(void *pv) {
                     strcpy(cmd_buffer.input, line_buffer);
                     cmd_buffer.state = CMD_STATE_IDLE;
                     xSemaphoreGive(cmd_buffer.mutex);
+                } else {
+                    printf("Error: Cant take CMD mutex to update history and input\r\n");
                 }
                 continue;
             }
@@ -254,6 +267,8 @@ static void keyTask(void *pv) {
                         }
                     }
                     xSemaphoreGive(cmd_buffer.mutex);
+                } else {
+                    printf("Error: Cant take CMD mutex to navigate history\r\n");
                 }
                 continue;
             }
@@ -267,6 +282,8 @@ static void keyTask(void *pv) {
                     if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                         strcpy(cmd_buffer.input, line_buffer);
                         xSemaphoreGive(cmd_buffer.mutex);
+                    } else {
+                        printf("Error: Cant take CMD mutex to update input\r\n");
                     }
                 } else {
                     printf("Command buffer full!\r\n");
@@ -277,11 +294,12 @@ static void keyTask(void *pv) {
             if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 cmd_buffer.state = (line_pos > 0) ? CMD_STATE_TYPING : CMD_STATE_IDLE;
                 xSemaphoreGive(cmd_buffer.mutex);
+            } else {
+                printf("Error: Cant take CMD mutex to update state\r\n");
             }
         } else if (current_page == PAGE_DYNAMIC_WINDOW) {
             // If in dynamic window mode this gives control to user if programmed to interact with anything that is displayed
         }
-        // Update last keycode for debugging and polling delay to avoid spamming I2C
         DEV_Delay_ms(POLL_MS);
     }
 }
@@ -298,12 +316,12 @@ bool Keyboard_Init(TwoWire *i2cInstance, uint8_t i2cAddress){
     if (!i2cInstance) return false;
     ikey_i2c = i2cInstance;
     ikey_addr = i2cAddress;
-    if (!key_mutex) key_mutex = xSemaphoreCreateMutex();
+    if (!i2c_mutex) i2c_mutex = xSemaphoreCreateMutex();
 
     if (Keyboard_IsConnected()) {
         key_connected = true;
     } else {
-        printf("Error: Keyboard could not connect on init! Starting task anyway.");
+        printf("Error: Keyboard could not connect on init! Starting task anyway.\r\n");
     }
 
     Keyboard_StartTask();

@@ -1,6 +1,6 @@
 #include "Display.h"
 #include "ESP32_WiFi.h"
-#include <WiFi.h>
+//#include <WiFi.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -8,7 +8,7 @@ static TaskHandle_t wifi_scan_task = NULL;
 static TaskHandle_t wifi_host_task = NULL;
 static uint32_t scan_interval = 60000;
 
-
+/*
 // Scan for WiFi networks and print results to serial, also updates the home page with current scans
 static void wifiScanTask(void *pv) {
     (void)pv;
@@ -70,6 +70,7 @@ bool WiFi_Disconnect(void) {
 }
 */
 
+/*
 
 // Task to monitor hosting state and print connected clients every 8s
 static void wifiHostTask(void *pv) {
@@ -128,7 +129,7 @@ bool WiFi_StopHost(void) {
     // Make sure we return a realistic value so command can update internal state
     return task_stopped && disconnect_called && mode_off && ap_stopped;
 }
-
+*/
 
 
 

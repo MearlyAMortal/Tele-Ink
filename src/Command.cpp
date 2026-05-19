@@ -2,21 +2,24 @@
 // For public queue/buffer
 #include "Display.h"
 #include "Modem.h"
-#include "ESP32_WiFi.h"
+//#include "ESP32_WiFi.h"
 #include <stdio.h>
 // FD
 #include <string.h>
 
 static char sms_number[32] = {0};
+static ModemHttpResponse http_response = {0};
 
 // Quick way to exit the if else tree if condition is not met
 // Takes a string for the output command (usually an error)
 static void Command_SetDone(const char* out){
     if (!out) return;
-    if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         strncpy(cmd_buffer.output, out, sizeof(cmd_buffer.output) - 1);
         cmd_buffer.state = CMD_STATE_DONE;
         xSemaphoreGive(cmd_buffer.mutex);
+    } else {
+        printf("Error: Cant take CMD mutex to set done state\r\n");
     }
     // State will reflect processing if the mutex cannot be taken but should return back to typing.    
 }
@@ -50,7 +53,6 @@ static bool Sms_IsValidNumber(const char* s) {
     return digits >= 10;
 }
 
-
 // Takes message number makes sure its numbers and subtracts 1 to correspond with idx not number
 static int ValidateID(const char* str){
     if (!str || strlen(str) == 0) return -1;
@@ -63,7 +65,6 @@ static int ValidateID(const char* str){
     int idx = atoi(str);
     return idx-1; // FIXING USER INPUT TO MATCH MODEM IDX NOT NUMBER
 }
-
 
 // Takes idx number after validateID and checks if it matches any of the saved sms idxs from the last AT+CMGL command and returns true if it does, false if not
 static bool IsValidSmsID(int idx){
@@ -88,7 +89,6 @@ static void RemoveSmsID(int idx){
         sms_ids[9] = -1;
     }
 }
-
 
 // Collect unread sms message idxs for later retrieval user "ALL" filter to collect unread and read messages
 static int GetSmsIndices(const char* resp, const char* status_filter, int* ids, int max_ids) {
@@ -125,8 +125,6 @@ static void SetSmsNumbers(char* id_str, const int* ids, int num) {
     }
 }
 
-
-
 // Wizard for handling sending sms messages when in sms_send mode
 static void SMS_SEND_Wizard(char *in) {
     if (strcmp(in, "/exit") == 0) {
@@ -144,6 +142,7 @@ static void SMS_SEND_Wizard(char *in) {
     return;
 }
 
+// Wizard for handling reading unread/all messages and responding/deleting when in sms_read mode
 static void SMS_READ_Wizard(char *in) {
     // No messages to read left from unread and not responding
     if (sms_count <= 0 && strcmp(in, "/s") != 0) {
@@ -177,7 +176,7 @@ static void SMS_READ_Wizard(char *in) {
     if (strncmp(in, "/d", 2) == 0) {
         // Delete all msgs on sim
         if (strncmp(in, "/da", 3) == 0) {
-            if (Modem_SendAT("AT+CMGD=1,4", tmp, sizeof(tmp), 5000)) {
+            if (Modem_SendAT("AT+CMGD=1,4", NULL, tmp, sizeof(tmp), 5000)) {
                 sms_count = 0;
                 sms_unread_count = 0;
                 sms_read = false;
@@ -199,7 +198,7 @@ static void SMS_READ_Wizard(char *in) {
             }
             // Send delete AT
             snprintf(cmd, sizeof(cmd), "AT+CMGD=%d", idd);
-            if (Modem_SendAT(cmd, tmp, sizeof(tmp), 5000)) {
+            if (Modem_SendAT(cmd, NULL, tmp, sizeof(tmp), 5000)) {
                 --sms_count;
                 RemoveSmsID(idd);
                 Command_SetDone("Successfully deleted");
@@ -215,7 +214,7 @@ static void SMS_READ_Wizard(char *in) {
     if (idr >= 0 && IsValidSmsID(idr)) {
         // Send read AT and fix response and sms_count
         snprintf(cmd, sizeof(cmd), "AT+CMGR=%d", idr);
-        Modem_SendAT(cmd, tmp, sizeof(tmp), 2000);
+        Modem_SendAT(cmd, NULL, tmp, sizeof(tmp), 2000);
         ReplaceControlChars(tmp);
         // Delete message from unread and global ids since its read
         if (!sms_read_all) {
@@ -300,7 +299,7 @@ static void AT_Wizard(char *in) {
     snprintf(at_cmd, sizeof(at_cmd), "AT%s", in);
     // Send AT command and collect response
     char at_resp[CMD_BUFFER_SIZE] = {0};
-    if (Modem_SendAT(at_cmd, at_resp, CMD_BUFFER_SIZE, 5000)){
+    if (Modem_SendAT(at_cmd, NULL, at_resp, CMD_BUFFER_SIZE, 5000)){
         ReplaceControlChars(at_resp);
         // Remove input echo from response
         char *resp_data = at_resp + strlen(at_cmd);
@@ -310,6 +309,23 @@ static void AT_Wizard(char *in) {
         Command_SetDone("Error: AT failed or timed out");
     }
     return;
+}
+
+// Takes gnss and or signal bool to change polling rate depending on a user speicified integer and then calls the display function to update global returns true if display function returns true;
+static bool Command_SetPollingRate(bool gnss, bool signal, char *in) {
+    if (!gnss && !signal) return false;
+    PollRate new_rate = POLL_RATE_MEDIUM;
+    if (strcmp(in, "1") == 0) {
+        new_rate = POLL_RATE_LOW;
+    } else if (strcmp(in, "2") == 0) {
+        new_rate = POLL_RATE_MEDIUM;
+    } else if (strcmp(in, "3") == 0) {
+        new_rate = POLL_RATE_HIGH;
+    } else {
+        Command_SetDone("Error: Invalid (1,2,3)");
+        return false;
+    }
+    return ChangePollingRate(gnss, signal, new_rate);
 }
 
 // Wizard for handling gnss mode inputs.
@@ -338,7 +354,7 @@ static void GNSS_Wizard(char *in) {
         if (was_on) {
             Command_SetDone("Error: GNSS is allready on");
         }
-        else if (Modem_SendAT("AT+CGPS=1", gnss_info, sizeof(gnss_info), 5000)) {
+        else if (Modem_SendAT("AT+CGPS=1", NULL, gnss_info, sizeof(gnss_info), 5000)) {
             if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
                 gnss_data.gnss_on = true;
                 xSemaphoreGive(gnss_data.mutex);
@@ -357,7 +373,7 @@ static void GNSS_Wizard(char *in) {
         if (!was_on) {
             Command_SetDone("Error: GNSS is allready off");
         }
-        else if (Modem_SendAT("AT+CGPS=0", gnss_info, sizeof(gnss_info), 5000)) {
+        else if (Modem_SendAT("AT+CGPS=0", "+CGPS: 0", gnss_info, sizeof(gnss_info), 5000)) {
             if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
                 gnss_data.gnss_on = false;
                 xSemaphoreGive(gnss_data.mutex);
@@ -376,7 +392,7 @@ static void GNSS_Wizard(char *in) {
         if (!was_on) {
             Command_SetDone("Error: GNSS is not on");
         }
-        else if (Modem_SendAT("AT+CGPSINFO", gnss_info, sizeof(gnss_info), 5000)) {
+        else if (Modem_SendAT("AT+CGPSINFO", NULL, gnss_info, sizeof(gnss_info), 5000)) {
             ReplaceControlChars(gnss_info);
             char *data = gnss_info + strlen("AT+CGPSINFO +CGPSINFO: ");
             while (*data == ' ')
@@ -388,14 +404,87 @@ static void GNSS_Wizard(char *in) {
             Command_SetDone("Error: Failed to get GNSS");
         }
         return;
-    } else {
+    } 
+    else if (strncmp(in, "poll ", 5) == 0) {
+        if (!Command_SetPollingRate(true, false, in + 5)) {
+            Command_SetDone("Error: GNSS polling rate fail");
+        } else {
+            Command_SetDone("GNSS polling rate updated");
+        }
+        return;
+    }
+    else {
         Command_SetDone("Error: Unknown GNSS command");
     }
     return;
 }
 
+// Wizard for handling http mode inputs. Only get method implemented for now
+static void HTTP_Wizard(char *in) {
+    if (strcmp(in, "/exit") == 0) {
+        Command_SetDone("Exiting HTTP mode");
+        http_mode = false;
+        return;
+    }
+    if (strncmp(in, "get ", 4) == 0) {
+        ModemHttpRequest req;
+        req.method = MODEM_HTTP_GET;
+        req.url = in + 4;
+        req.body = NULL;
+        // Put first 256 chars of response in output to see what kind of data
+        if (Modem_SendHttpRequest(&req, &http_response)) {
+            char buf[256];
+            ReplaceControlChars(http_response.body);
+            snprintf(buf, sizeof(buf), "HTTP %d: %.64s", http_response.status_code, http_response.body);
+            Command_SetDone(buf);
+            return;
+        } 
+
+        Command_SetDone("Error: HTTP GET failed");
+        return;
+    } 
+    else if (strncmp(in, "list", 4) == 0) {
+        Command_SetDone("test, lrp");
+        return;
+    }
+    else if (strncmp(in, "test", 4) == 0) {
+        ModemHttpRequest req;
+        req.method = MODEM_HTTP_GET;
+        req.url = "http://httpbin.org/get";
+        req.body = NULL;
+         if (Modem_SendHttpRequest(&req, &http_response)) {
+            char buf[256];
+            ReplaceControlChars(http_response.body);
+            snprintf(buf, sizeof(buf), "HTTP %d: %.64s", http_response.status_code, http_response.body);
+            Command_SetDone(buf);
+            return;
+        } 
+        return;
+    }
+    else if (strncmp(in, "lrp", 7) == 0) {
+        ModemHttpRequest req;
+        req.method = MODEM_HTTP_GET;
+        req.url = "http://www.logansroyalpalace.com";
+        req.body = NULL;
+         if (Modem_SendHttpRequest(&req, &http_response)) {
+            char buf[256];
+            ReplaceControlChars(http_response.body);
+            snprintf(buf, sizeof(buf), "HTTP %d: %.64s", http_response.status_code, http_response.body);
+            Command_SetDone(buf);
+        return;
+        }
+    }
+    else if (strncmp(in, "post ", 5) == 0) {
+        Command_SetDone("Error: No HTTP POST");
+        return;
+    } else {
+        Command_SetDone("Error: Bad HTTP command");
+    }
+    return;
+}
 
 // Wizard for WiFi handling (under costruction) (only one mode at a time)
+/*
 static void WiFi_Wizard(char *in) {
     // Edit wifi_mode even if wifi is still on
     if (strcmp(in, "/exit") == 0) {
@@ -442,7 +531,7 @@ static void WiFi_Wizard(char *in) {
                 return;
             }
         }
-        /*
+        
         else if (was_connected) {
             if (WiFi_Disconnect()) {
                 if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
@@ -460,7 +549,7 @@ static void WiFi_Wizard(char *in) {
                 return;
             }
         }
-        */
+        
         else if (was_host) {
             if (WiFi_StopHost()) {
                 if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
@@ -529,6 +618,9 @@ static void WiFi_Wizard(char *in) {
     return;
 }
 
+*/
+
+/*
 // Helper to return true if wifi state is showing "off" or sets command done with an error and returns false
 static bool WiFiOff() {
     if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
@@ -544,7 +636,10 @@ static bool WiFiOff() {
     }
     return true;
 }
+    */
 
+
+    
 // Helper to return true if gnss state is showing "off" or sets command done with an error and returns false
 static bool GNSSOff() {
     if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
@@ -570,7 +665,7 @@ void Command_Handle(void){
     char in[CMD_BUFFER_SIZE] = {0};
 
     // Grab the command buffer and set state as processing
-    if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    if (xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         strncpy(in, cmd_buffer.input, sizeof(in) - 1);
         cmd_buffer.state = CMD_STATE_PROCESSING;
         xSemaphoreGive(cmd_buffer.mutex);
@@ -608,11 +703,17 @@ void Command_Handle(void){
         GNSS_Wizard(in);
         return;
     }
+    else if (http_mode) {
+        HTTP_Wizard(in);
+        return;
+    }
     // WiFi Wizard for scanning connecting and hosting (need to build more)
+    /*
     else if (wifi_mode) {
         WiFi_Wizard(in);
         return;
     }
+        */
 
     // No wizardry needed so continue with muggle input
 
@@ -629,7 +730,7 @@ void Command_Handle(void){
     // If else tree of doom that can select mode or exectute specific commands
     // Help menu
     if (strcmp(in, "/help") == 0 || strcmp(in, "/h") == 0) {
-        Command_SetDone("CMDS: /at /gnss /sms /sim /clear");
+        Command_SetDone("CMDS: /at /gnss /sms /http /sim /esp /clear");
         return;
     } 
     // Clear history
@@ -659,10 +760,15 @@ void Command_Handle(void){
                 Command_SetDone("Error: Modem is ON");
             }
             return;
-        } else if (strcmp(in, "/sim off") == 0) {  
+        } 
+        else if (strcmp(in, "/sim help") == 0) {
+            Command_SetDone("SIM CMDS: on/off/rst/net/info/poll");
+            return;
+        }
+        else if (strcmp(in, "/sim off") == 0) {  
             if (modem_ready) {
                 Modem_TogglePWK(3000);
-                ResetGlobalModeState();
+                //ResetGlobalModeState();
                 Command_SetDone("Toggled pwk for modem OFF");
             } else {
                 Command_SetDone("Error: Modem is OFF");
@@ -681,14 +787,34 @@ void Command_Handle(void){
         else if (strcmp(in, "/sim net") == 0) {
             if (modem_ready) {
                 char tmp[256] = {0};
-                Modem_SendAT("AT+CREG?", tmp, sizeof(tmp), 5000);
+                Modem_SendAT("AT+CREG?", NULL, tmp, sizeof(tmp), 5000);
                 ReplaceControlChars(tmp);
                 Command_SetDone(tmp);
             } else {
                 Command_SetDone("Error: Modem not ready");
             }
             return;
-        } else {
+        } 
+        else if (strcmp(in, "/sim info") == 0) {
+            if (modem_ready) {
+                char tmp[256] = {0};
+                Modem_SendAT("AT+CGMM", NULL, tmp, sizeof(tmp), 5000);
+                ReplaceControlChars(tmp);
+                Command_SetDone(tmp);
+            } else {
+                Command_SetDone("Error: Modem not ready");
+            }
+            return;
+        }
+        else if (strncmp(in, "/sim poll ", 10) == 0) {
+            if (!Command_SetPollingRate(false, true, in + 10)) {
+                Command_SetDone("Error: Signal poll fail");
+            } else {
+                Command_SetDone("Signal polling rate updated");
+            }
+            return;
+        }
+        else {
             Command_SetDone("Error: Unknown SIM command");
         }
         return;
@@ -702,7 +828,7 @@ void Command_Handle(void){
         // Make sure GNSS is off first
         if (!GNSSOff()) return;
         // Make sure WiFi is off first
-        if (!WiFiOff()) return;
+        //if (!WiFiOff()) return;
         // Enable text mode
         char tmp[512] = {0};
         if (!Modem_SetCheckMode(1)){
@@ -717,7 +843,7 @@ void Command_Handle(void){
         if (strncmp(in, "/sms r", 6) == 0) {
              // Unread msgs
             if (strncmp(in, "/sms ru", 7) == 0) {
-                if (!Modem_SendAT ("AT+CMGL=\"REC UNREAD\"", tmp, sizeof(tmp), 5000)) {
+                if (!Modem_SendAT ("AT+CMGL=\"REC UNREAD\"", NULL, tmp, sizeof(tmp), 5000)) {
                     Command_SetDone("Error: Failed to read SMS");
                     return;
                 }
@@ -737,7 +863,7 @@ void Command_Handle(void){
             }
             // All msgs on sim
             else if (strncmp(in, "/sms ra", 7) == 0) {
-                if (!Modem_SendAT ("AT+CMGL=\"ALL\"", tmp, sizeof(tmp), 5000)) {
+                if (!Modem_SendAT ("AT+CMGL=\"ALL\"", NULL, tmp, sizeof(tmp), 5000)) {
                     Command_SetDone("Error: Failed to read SMS");
                     return;
                 }
@@ -801,13 +927,12 @@ void Command_Handle(void){
         }
          // Make sure GNSS is off first
         if (!GNSSOff()) return;
-        // Make sure WiFi is off first
-        if (!WiFiOff()) return;
+        
         // QUICK COMMAND
         if (strlen(in) > 4 && in[3] == ' ') {
             char *at_cmd = in + 4;
             char at_resp[CMD_BUFFER_SIZE] = {0};
-            if (!Modem_SendAT(at_cmd, at_resp, CMD_BUFFER_SIZE, 5000)){
+            if (!Modem_SendAT(at_cmd, NULL, at_resp, CMD_BUFFER_SIZE, 5000)){
                 strncpy(out, "Error: AT failed or timed out", sizeof(out) - 1);
             } else {
                 ReplaceControlChars(at_resp);
@@ -828,24 +953,26 @@ void Command_Handle(void){
             Command_SetDone("Error: Modem is not ready");
             return;
         }
-        // Make sure WiFi is off first
-        if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-            if (wifi_data.wifi_on) {
-                Command_SetDone("Error: Turn WiFi off first");
-                xSemaphoreGive(wifi_data.mutex);
-                return;
-            }
-            xSemaphoreGive(wifi_data.mutex);
-        } else {
-            Command_SetDone("Error: Cant take WiFi mutex");
-            return;
-        }
 
         gnss_mode = true;
-        Command_SetDone("GNSS mode: on/off/info");
+        Command_SetDone("GNSS mode: on/off/info/poll");
         return;
     }
+    // HTTP API wizard entry 
+    else if (strcmp(in, "/http") == 0) {
+        if (!modem_ready) {
+            Command_SetDone("Error: Modem is not ready");
+            return;
+        }
+        // Make sure GNSS is off first
+        if (!GNSSOff()) return;
+        http_mode = true;
+        Command_SetDone("HTTP mode: get/post url body");
+        return;
+    }
+
     // WiFi wizard entry (not fully implemented)
+    /*
     else if (strcmp(in, "/wifi") == 0) {
         if (!modem_ready) {
             Command_SetDone("Error: Modem is not ready");
@@ -867,7 +994,9 @@ void Command_Handle(void){
         wifi_mode = true;
         Command_SetDone("scan, connect, host, stop");
         return;
-    } else {
+    } 
+    */    
+    else {
         Command_SetDone("Error: Unknown command");
         return;
     }

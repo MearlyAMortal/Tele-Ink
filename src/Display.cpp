@@ -20,7 +20,7 @@ PageType current_page = PAGE_NONE;
 PageType last_page = PAGE_NONE;
 bool modem_ready = false;
 bool modem_net = false;
-bool modem_powered = false;
+//bool modem_powered = false;
 uint8_t modem_mode = 1;   // Default text mode not PDU mode
 bool sms_send = false;
 bool sms_read = false;
@@ -30,10 +30,11 @@ int sms_unread_count = 0;
 int sms_ids[10] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
 bool at_mode = false;
 bool gnss_mode = false;
-bool wifi_mode = false;
+//bool wifi_mode = false;
+bool http_mode = false;
 CommandBuffer cmd_buffer = {0};
 GNSSData gnss_data = {0};
-WifiData wifi_data = {0};
+//WifiData wifi_data = {0};
 SignalData signal_data = {0};
 // Private
 // Screen
@@ -92,68 +93,73 @@ static void paintHomeScreen(void) {
     paintConfigureForMode(4);
     Paint_Clear(WHITE);
     // title
-    Paint_DrawString_EN(10, 5, "Tele-Ink", &Font24, WHITE, BLACK);
-    //Paint_DrawString_EN(160, 10, "Version 0.2.6", &Font12, WHITE, BLACK);
+    Paint_DrawString_EN(15, 5, "***** STATUS *****", &Font20, WHITE, BLACK);
     // Seperator line
-    Paint_DrawLine(5, 30, Font24.Width * 16, 30, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
+    Paint_DrawLine(8, 25, Font24.Width * 16, 25, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
 
 
     // Vertical split
-    Paint_DrawLine((display_w/2) + 40, 1, (display_w/2) + 40, (display_h/2) + 40, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
+    Paint_DrawLine((display_w/2) + 45, 1, (display_w/2) + 45, (display_h/2) + 50, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
     // bottom split
-    Paint_DrawLine(1, (display_h/2) + 40, display_w-1, (display_h/2) + 40, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
+    Paint_DrawLine(1, (display_h/2) + 50, display_w-1, (display_h/2) + 50, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
 
 
     // Modem text mode
     char buf[64] = {0};
     if (at_mode) {
-        snprintf(buf, sizeof(buf), "CMD Mode: AT", at_mode);
+        snprintf(buf, sizeof(buf), "Mode: AT");
     }
     else if (sms_read || sms_send) {
-        snprintf(buf, sizeof(buf), "CMD Mode: SMS", at_mode);
+        snprintf(buf, sizeof(buf), "Mode: SMS %s", sms_send ? "->" : "<-");
     }
     else if (gnss_mode) {
-        snprintf(buf, sizeof(buf), "CMD Mode: GNSS", at_mode);
+        snprintf(buf, sizeof(buf), "Mode: GNSS");
     }
+    /*
     else if (wifi_mode) {
         snprintf(buf, sizeof(buf), "CMD Mode: WiFi", at_mode);
     }
+        */
+    else if (http_mode) {
+        snprintf(buf, sizeof(buf), "Mode: HTTP");
+    }
     else {
-        snprintf(buf, sizeof(buf), "CMD Mode: Base", at_mode);
+        snprintf(buf, sizeof(buf), "Mode: $BASE");
     }
-    Paint_DrawString_EN(10, 40, buf, &Font16, BLACK, WHITE);
-
-    //  status
-    if (modem_powered && modem_ready){
-        Paint_DrawString_EN(10, 60, "Modem +", &Font16, BLACK, WHITE);
-        if (modem_net) {
-            Paint_DrawString_EN(10, 60, "Network +", &Font16, BLACK, WHITE);
-        } 
+    Paint_DrawString_EN(10, 35, buf, &Font24, BLACK, WHITE);
+    
+    // modem status
+    if (modem_ready && modem_net) {
+        snprintf(buf, sizeof(buf), "Modem: Online");
+    } else if (modem_ready && !modem_net) {
+        snprintf(buf, sizeof(buf), "Modem: Ready");
     } else {
-        Paint_DrawString_EN(10, 60, "Modem -", &Font16, BLACK, WHITE);
+        snprintf(buf, sizeof(buf), "Modem: Off");
     }
+    Paint_DrawString_EN(10, 95, buf, &Font24, BLACK, WHITE);
 
     // GNSS
     if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
         if (gnss_data.gnss_on) {
-            Paint_DrawString_EN(10, 80, "GNSS +", &Font16, BLACK, WHITE);
+            snprintf(buf, sizeof(buf), "GNSS: %s", gnss_data.poll_rate == POLL_RATE_LOW ? "LOW" : gnss_data.poll_rate == POLL_RATE_MEDIUM ? "MED" : "HIGH");
         } else {
-            Paint_DrawString_EN(10, 80, "GNSS -", &Font16, BLACK, WHITE);
+            snprintf(buf, sizeof(buf), "GNSS: Off");
         }
         xSemaphoreGive(gnss_data.mutex);
     } else {
-        Paint_DrawString_EN(10, 80, "GNSS ?", &Font16, BLACK, WHITE);
+        snprintf(buf, sizeof(buf), "GNSS ?");
     }
+    Paint_DrawString_EN(10, 125, buf, &Font24, BLACK, WHITE);
     
-    // SMS (temporary)
-    if (sms_unread_count > 0) {
-        char buf[32];
-        snprintf(buf, sizeof(buf), "SMS New: %d", sms_unread_count);
-        Paint_DrawString_EN(10, 100, buf, &Font16, BLACK, WHITE);
+    // SMS
+    if (sms_unread_count >= 0 && sms_unread_count <= 15) {
+        snprintf(buf, sizeof(buf), "New SMS: %d", sms_unread_count);
     } else {
-        Paint_DrawString_EN(10, 100, "SMS: 0", &Font16, BLACK, WHITE);
+        snprintf(buf, sizeof(buf), "SMS ?");
     }
+    Paint_DrawString_EN(10, 155, buf, &Font24, BLACK, WHITE);
 
+    /*
     // WiFi
     if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
         if (wifi_data.wifi_on) {
@@ -176,6 +182,7 @@ static void paintHomeScreen(void) {
     } else {
         Paint_DrawString_EN(10, 120, "WiFi ?", &Font16, BLACK, WHITE);
     }
+        */
 
     // Parse signal type and corresponding strength
     if (xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
@@ -185,81 +192,80 @@ static void paintHomeScreen(void) {
         if (signal_data.rsrq != 255 && signal_data.rsrp != 255) {
             if (signal_data.rsrq >= 0 && signal_data.rsrq <= 9) {
                 // poor signal
-                snprintf(result, sizeof(result), "4G LTE :(");
+                snprintf(result, sizeof(result), "NET: 4G LTE :(");
             } else if (signal_data.rsrq >= 10 && signal_data.rsrq <= 19) {
                 // moderate signal
-                snprintf(result, sizeof(result), "4G LTE :|");
+                snprintf(result, sizeof(result), "NET: 4G LTE :|");
             } else if (signal_data.rsrq >= 20 && signal_data.rsrq <= 30) {
                 // good signal
-                snprintf(result, sizeof(result), "4G LTE :)");
+                snprintf(result, sizeof(result), "NET: 4G LTE :)");
             } else if (signal_data.rsrq > 30) {
                 // excellent signal
-                snprintf(result, sizeof(result), "4G LTE :D");
+                snprintf(result, sizeof(result), "NET: 4G LTE :D");
             }
         } 
         // 3G fallback (UMTS/WCDMA)
         else if (signal_data.rscp != 255 && signal_data.ecno != 255) {
-            snprintf(result, sizeof(result), "3G");
+            snprintf(result, sizeof(result), "NET: 3G");
         }
         // 2G unlikely fallback (GSM)
         else if (signal_data.rxlev != 99 && signal_data.ber != 99) {
-            snprintf(result, sizeof(result), "2G");
+            snprintf(result, sizeof(result), "NET: 2G");
         }   
         // No signal
         else {
-            snprintf(result, sizeof(result), "No Service");
+            if (modem_ready && modem_net) {
+                snprintf(result, sizeof(result), "NET: Looking...");
+            } else {
+                snprintf(result, sizeof(result), "NET: Offline");
+            }
         }
-        Paint_DrawString_EN((display_w/2) + 30 - (strlen(result) * Font16.Width), 8, result, &Font16, WHITE, BLACK);
-
+        //Paint_DrawString_EN((display_w/2) + 30 - (strlen(result) * Font16.Width), 8, result, &Font16, WHITE, BLACK);
+        Paint_DrawString_EN(10, 65, result, &Font24, BLACK, WHITE);
         xSemaphoreGive(signal_data.mutex);
-    } 
+    } else {
+        Paint_DrawString_EN(10, 65, "NET: ?", &Font24, BLACK, WHITE);
+    }
+
+    // Dynamic region (for testing purposes only)
+    Paint_DrawString_EN((display_w/2)-((strlen("# Dynamic Region Unused #")*Font20.Width)/2), (display_h/2) + 80, "# Dynamic Region Unused #", &Font20, WHITE, BLACK);
+
 
     // GNSS data (must be last)
     if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
-        // 
+        char result[64] = {0};
+
         if (gnss_data.time[0] == '\0') {
-            Paint_DrawString_EN(display_w - 10 - (Font16.Width * strlen("GNSS Unavailable")), 5, "GNSS Unavailable", &Font16, BLACK, WHITE);
+            Paint_DrawString_EN(display_w - 8 - (Font16.Width * strlen("GNSS Unavailable")), 8, "GNSS Unavailable", &Font16, BLACK, WHITE);
             xSemaphoreGive(gnss_data.mutex);
             return;
-        }
-        char result[64] = {0};
-        double lon = gnss_data.longitude;
-        // rouch longitute math for calculating local time from utc for display, not accounting for daylight savings or anything, just rough
-        int local_time_offset = (int)(lon / 15); // 15 degrees of longitude per hour
-        snprintf(result, sizeof(result), "Local Time UTC%+d", local_time_offset);
-        Paint_DrawString_EN(display_w - 10 - (Font16.Width * strlen(result)), 10, result, &Font16, BLACK, WHITE);
-        // Draw sun or moon based on rough local time, not accounting for date or anything, just rough
-        int local_hour = 0;
-        if (sscanf(gnss_data.time, "%2d", &local_hour) == 1) {
-            local_hour = (local_hour + 24) % 24; // wrap around 24 hours
-            if (local_hour >= 6 && local_hour < 18) {
-                // Daytime: draw sun
-                Paint_DrawCircle((display_w/2) + 70, (display_h/2)+1, 20, BLACK, DOT_PIXEL_1X1, DRAW_FILL_EMPTY);
-            } else {
-                // Nighttime: draw moon
-                Paint_DrawCircle((display_w/2) + 70, (display_h/2)+1, 20, BLACK, DOT_PIXEL_1X1, DRAW_FILL_FULL);
-                Paint_DrawCircle((display_w/2) + 65, (display_h/2)+1, 20, WHITE, DOT_PIXEL_1X1, DRAW_FILL_FULL);
-            }
+        } else {
+            // rough longitute math for calculating local time from utc for display, not accounting for daylight savings
+            double lon = gnss_data.longitude;
+            int local_time_offset = (int)(lon / 15); // 15 degrees of longitude per hour
+            snprintf(result, sizeof(result), "Local UTC%+d", local_time_offset);
+            Paint_DrawString_EN(display_w - 10 - (Font20.Width * strlen(result)), 10, result, &Font20, BLACK, WHITE);
         }
 
+        // Draw data out
         memset(result, 0, sizeof(result));
         snprintf(result, sizeof(result), "Time: %s", gnss_data.time);
-        Paint_DrawString_EN(display_w - 10 - (Font12.Width * strlen(result)), 30, result, &Font12, WHITE, BLACK);
+        Paint_DrawString_EN(display_w - 10 - (Font16.Width * strlen(result)), 35, result, &Font16, WHITE, BLACK);
         memset(result, 0, sizeof(result));
         snprintf(result, sizeof(result), "Date: %s", gnss_data.date);
-        Paint_DrawString_EN(display_w - 10 - (Font12.Width * strlen(result)), 50, result, &Font12, WHITE, BLACK);
+        Paint_DrawString_EN(display_w - 10 - (Font16.Width * strlen(result)), 60, result, &Font16, WHITE, BLACK);
         memset(result, 0, sizeof(result));
-        snprintf(result, sizeof(result), "Latitude: %.6f", gnss_data.latitude);
-        Paint_DrawString_EN(display_w - 10 - (Font12.Width * strlen(result)), 70, result, &Font12, WHITE, BLACK);
+        snprintf(result, sizeof(result), "Lat: %.6f", gnss_data.latitude);
+        Paint_DrawString_EN(display_w - 10 - (Font16.Width * strlen(result)), 85, result, &Font16, WHITE, BLACK);
         memset(result, 0, sizeof(result));
-        snprintf(result, sizeof(result), "Longitude: %.6f", gnss_data.longitude);
-        Paint_DrawString_EN(display_w - 10 - (Font12.Width * strlen(result)), 90, result, &Font12, WHITE, BLACK);
+        snprintf(result, sizeof(result), "Lon: %.6f", gnss_data.longitude);
+        Paint_DrawString_EN(display_w - 10 - (Font16.Width * strlen(result)), 110, result, &Font16, WHITE, BLACK);
         memset(result, 0, sizeof(result));
-        snprintf(result, sizeof(result), "Altitude M: %s", gnss_data.altitude);
-        Paint_DrawString_EN(display_w - 10 - (Font12.Width * strlen(result)), 110, result, &Font12, WHITE, BLACK);
+        snprintf(result, sizeof(result), "Alt M: %s", gnss_data.altitude);
+        Paint_DrawString_EN(display_w - 10 - (Font16.Width * strlen(result)), 135, result, &Font16, WHITE, BLACK);
         memset(result, 0, sizeof(result));
-        snprintf(result, sizeof(result), "Speed KN: %s", gnss_data.speed);
-        Paint_DrawString_EN(display_w - 10 - (Font12.Width * strlen(result)), 130, result, &Font12, WHITE, BLACK);
+        snprintf(result, sizeof(result), "Spd K: %s", gnss_data.speed);
+        Paint_DrawString_EN(display_w - 10 - (Font16.Width * strlen(result)), 160, result, &Font16, WHITE, BLACK);
         xSemaphoreGive(gnss_data.mutex);
     }
 }
@@ -294,13 +300,13 @@ static void paintBootScreen(void) {
     Paint_DrawCircle(105, 95, 20, WHITE, DOT_PIXEL_1X1, DRAW_FILL_FULL);
     Paint_DrawLine(85, 95, 125, 95, BLACK, DOT_PIXEL_1X1, LINE_STYLE_DOTTED);
     Paint_DrawLine(105, 75, 105, 115, BLACK, DOT_PIXEL_1X1, LINE_STYLE_DOTTED);
-    Paint_DrawString_EN(10, 5, "Tele-Ink v0.3.0", &Font16, BLACK, WHITE);
+    Paint_DrawString_EN(10, 5, "Tele-Ink v0.3.2", &Font16, BLACK, WHITE);
     Paint_DrawString_EN(10, 20, "By: Logan Puntous", &Font12, WHITE, BLACK);
     Paint_DrawNum(10, 33, 123456789, &Font12, BLACK, WHITE);
     Paint_DrawNum(10, 50, 987654321, &Font16, WHITE, BLACK);
-    Paint_DrawString_EN(10, 150, "You can change modes w/ sym", &Font24, BLACK, GRAY1);
+    Paint_DrawString_EN(10, 150, "Use SYM key to change modes", &Font24, BLACK, GRAY1);
     Paint_DrawString_EN(10, 175, "In command mode use  /<cmd>", &Font24, WHITE, GRAY2);
-    Paint_DrawString_EN(10, 200, "You can execute AT commands", &Font24, WHITE, GRAY3);
+    Paint_DrawString_EN(10, 200, "HTTP GET/POST support /html", &Font24, WHITE, GRAY3);
     Paint_DrawString_EN(10, 225, "Global Roaming GNSS 4G Data", &Font24, WHITE, GRAY4);
 }
 // Paint the current page based on internal state using specifc paint function
@@ -399,6 +405,8 @@ void Display_ClearCommandHistory(void) {
             cmd_buffer.input_history[i][0] = '\0';
         }
         xSemaphoreGive(cmd_buffer.mutex);
+    } else {
+        printf("Display: failed to take cmd_buffer.mutex to clear history\r\n");
     }
 }
 
@@ -451,7 +459,7 @@ static void HandlePartialUpdate_command(void) {
     static char current_input[CMD_BUFFER_SIZE];
     static char history_copy[CMD_HISTORY_LINES][CMD_BUFFER_SIZE];
     int history_count = 0;
-    if (cmd_buffer.mutex && xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    if (cmd_buffer.mutex && xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         strcpy(current_input, cmd_buffer.input);
         history_count = cmd_buffer.history_count;
         for (int i = 0; i < history_count && i < CMD_HISTORY_LINES; i++) {
@@ -475,9 +483,13 @@ static void HandlePartialUpdate_command(void) {
         snprintf(display_line, sizeof(display_line), "AT%s_", current_input);
     } else if (gnss_mode) {
         snprintf(display_line, sizeof(display_line), "GNSS: %s_", current_input);
-    } else if (wifi_mode) {
+    } /*else if (wifi_mode) {
         snprintf(display_line, sizeof(display_line), "WiFi: %s_", current_input);
-    } else {
+    } */
+    else if (http_mode) {
+        snprintf(display_line, sizeof(display_line), "HTTP: %s_", current_input);
+    }
+    else {
         snprintf(display_line, sizeof(display_line), "$ %s_", current_input);
     }
 
@@ -694,7 +706,7 @@ static void Display_HandlePartialUpdate(void) {
     }
 }
 
-// Reset signal_data to unknown values (for display) on modem lost or reset
+// Reset signal_data to unknown values (for display) on modem lost or reset (for modem) to allow fallback network logic
 void SignalData_Reset(void) {
     if (signal_data.mutex && xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         signal_data.rxlev = 99;
@@ -703,8 +715,38 @@ void SignalData_Reset(void) {
         signal_data.ecno = 255;
         signal_data.rsrq = 255;
         signal_data.rsrp = 255;
+        gnss_data.poll_rate = POLL_RATE_MEDIUM;
         xSemaphoreGive(signal_data.mutex);
     }
+}
+
+// Reset gnss_data to default values 
+void GnssData_Reset(void) {
+    if (gnss_data.mutex && xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        gnss_data.latitude = 0.0;
+        gnss_data.longitude = 0.0;
+        gnss_data.altitude[0] = '\0';
+        gnss_data.speed[0] = '\0';
+        gnss_data.time[0] = '\0';
+        gnss_data.date[0] = '\0';
+        gnss_data.gnss_on = false;
+        gnss_data.poll_rate = POLL_RATE_MEDIUM;
+        xSemaphoreGive(gnss_data.mutex);
+    }
+}
+
+// Change internal polling rate selection for gnss_data and or signal_data depending on which one is NULL, Takes new polling rate to be set returns true if success
+bool ChangePollingRate(bool gnss, bool signal, PollRate new_rate) {
+    if (!gnss && !signal) return false;
+    if (gnss && gnss_data.mutex && xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        gnss_data.poll_rate = new_rate;
+        xSemaphoreGive(gnss_data.mutex);
+    }
+    if (signal && signal_data.mutex && xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        signal_data.poll_rate = new_rate;
+        xSemaphoreGive(signal_data.mutex);
+    }
+    return true;
 }
 
 // Reset all public modes back to default if modem is lost or reset
@@ -719,11 +761,14 @@ void ResetGlobalModeState(void) {
     sms_unread_count = 0;
     // GNSS
     gnss_mode = false;
+    /*
     if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         gnss_data.gnss_on = false;
         xSemaphoreGive(gnss_data.mutex);
     }
+        */
     // Wifi
+    /*
     wifi_mode = false;
     if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         wifi_data.wifi_on = false;
@@ -732,6 +777,9 @@ void ResetGlobalModeState(void) {
         wifi_data.wifi_host = false;
         xSemaphoreGive(wifi_data.mutex);
     }
+    */
+    // HTTP
+    http_mode = false;
 }
 
 // Display task consumes display events from queue to update internal state and update screen or polls for partial updates and idle timeout to show idle screen, runs indefinitely 
@@ -760,10 +808,10 @@ static void displayTask(void *pv) {
                 case DISP_EVT_SHOW_COMMAND: setPage(PAGE_COMMAND); page_change_evt = true; break;
                 case DISP_EVT_SHOW_IDLE: setPage(PAGE_IDLE); page_change_evt = true; break;
                 case DISP_EVT_SHOW_DYNAMIC_WINDOW: setPage(PAGE_DYNAMIC_WINDOW); page_change_evt = true; break;
-                case DISP_EVT_MODEM_POWERED: modem_powered = true; break;
-                case DISP_EVT_MODEM_READY: modem_ready = true; modem_powered = true; break;
-                case DISP_EVT_MODEM_NET: modem_ready = true; modem_powered = true; modem_net = true; break;
-                case DISP_EVT_MODEM_LOST: modem_ready = false; modem_net = false; SignalData_Reset(); ResetGlobalModeState(); break;
+                /*case DISP_EVT_MODEM_POWERED: modem_powered = true; break;*/
+                case DISP_EVT_MODEM_READY: modem_ready = true; /*modem_powered = true;*/ break;
+                case DISP_EVT_MODEM_NET: modem_ready = true; /*modem_powered = true;*/ modem_net = true; break;
+                case DISP_EVT_MODEM_LOST: modem_ready = false; modem_net = false; SignalData_Reset(); GnssData_Reset(); ResetGlobalModeState(); break;
                 case DISP_EVT_SMS_RECEIVED: sms_unread_count++; break;
             }
 
@@ -812,18 +860,18 @@ static void displayTask(void *pv) {
             SetLastActivityTick();
         } 
         
-        // Low activity
+        // Low activity counter
         if (screen_on && current_page != PAGE_IDLE && (xTaskGetTickCount() - last_activity_tick) >= pdMS_TO_TICKS(idle_timeout_ms)) {
             printf("Activity low in displayTask.\r\n");
             last_activity_tick = xTaskGetTickCount();
             ++idle_timeout_count;
         }
 
-        // No activity show idle page if on page other than home
-        if (screen_on && idle_timeout_count >= 3 && current_page != PAGE_IDLE && current_page != PAGE_HOME) {
-            printf("Switching to idle page due to inactivity.\r\n");
-            Display_Event_ShowIdle();
-            idle_timeout_count = 0; 
+        // No activity sleep screen after 3 consecutive idle timeouts
+        if (screen_on && idle_timeout_count >= 3 && current_page != PAGE_HOME) {
+            printf("Sleeping due to low activity.\r\n");
+            Display_Event_Sleep();
+            SetLastActivityTick();
         }
     }
 }
@@ -840,7 +888,7 @@ static void Display_StartTask(void) {
 void Display_Init(void) {
     // Mutex creation for displayTask and command buffer
     if (!epd_mutex && !cmd_buffer.mutex) {
-        // Main mutex for display ops
+        // Main mutex for epd spi api
         epd_mutex = xSemaphoreCreateMutex();
         // Mutex for shared command buffer
         cmd_buffer.mutex = xSemaphoreCreateMutex();
@@ -857,7 +905,7 @@ void Display_Init(void) {
     cmd_buffer.input_history_count = 0;
     cmd_buffer.state = CMD_STATE_IDLE;
     
-    // Set signal to unkown values to start
+    // Set signal to unkown values manually to start
     // Mutex isnt created yet becuase this task starts before modemTask
     signal_data.rxlev = 99;
     signal_data.ber = 99; 
@@ -865,8 +913,18 @@ void Display_Init(void) {
     signal_data.ecno = 255;
     signal_data.rsrq = 255;
     signal_data.rsrp = 255;
+    signal_data.poll_rate = POLL_RATE_MEDIUM;
+    // Same with GNSS
+    gnss_data.latitude = 0.0;
+    gnss_data.longitude = 0.0;
+    gnss_data.altitude[0] = '\0';
+    gnss_data.speed[0] = '\0';
+    gnss_data.time[0] = '\0';
+    gnss_data.date[0] = '\0';
+    gnss_data.poll_rate = POLL_RATE_MEDIUM;
 
     // Create mutex and Set wifi to unkown values to start
+    /*
     if (!wifi_data.mutex) {
         wifi_data.mutex = xSemaphoreCreateMutex();
         if (!wifi_data.mutex) {
@@ -881,6 +939,7 @@ void Display_Init(void) {
     wifi_data.password[0] = '\0';
     wifi_data.wifi_host = false;
 
+    */
 
     // Init EPD
     EPD_3IN7_4Gray_Init();
