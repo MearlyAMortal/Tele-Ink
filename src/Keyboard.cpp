@@ -117,6 +117,8 @@ static void keyTask(void *pv) {
         // Key press detected!
         SetLastActivityTick(); // Reset idle timer for display on any key press
 
+        printf("Keycode: 0x%02X\r\n", keycode);
+
         // Handle special key if mapped (exit sequential and return to base handling)
         if (keycode >= 0x80 && keycode <= 0xAF) {
             handle_special_key(keycode);
@@ -130,13 +132,12 @@ static void keyTask(void *pv) {
         if (sequential_mode) { 
             // Esc (replicates /exit) goes back one mode state if in a submode, otherwise goes back to base
             if (keycode == 0x1B) {
-                if (!at_mode && !sms_read && !sms_send && !gnss_mode ) {//&& !wifi_mode) {
+                if (!at_mode && !sms_read && !sms_send && !gnss_mode && !http_mode ) {
                     continue;
                 }
                 
                 at_mode = false;
                 gnss_mode = false;
-                //wifi_mode = false;
                 http_mode = false;
                 // If exiting from response return to sms_read mode with original state
                 if (sms_send && sms_read) {
@@ -217,7 +218,7 @@ static void keyTask(void *pv) {
                             strcpy(cmd_buffer.history[cmd_buffer.history_count], cmd_buffer.output);
                             cmd_buffer.history_count++;
                         } else {
-                            printf("ERROR: State not done after command_handle and or output empty\r\n");
+                            printf("No output or command not done, not adding to history\r\n");
                         }
                         xSemaphoreGive(cmd_buffer.mutex);
                     }  else {

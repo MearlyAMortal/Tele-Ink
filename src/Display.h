@@ -37,6 +37,7 @@ extern PageType current_page;
 extern PageType last_page;
 extern bool screen_on;
 
+
 // Display events
 typedef enum {
     DISP_EVT_NONE = 0,
@@ -46,7 +47,6 @@ typedef enum {
     DISP_EVT_SHOW_COMMAND,
     DISP_EVT_SHOW_IDLE,
     DISP_EVT_SHOW_DYNAMIC_WINDOW,
-    //DISP_EVT_MODEM_POWERED, // Modem
     DISP_EVT_MODEM_READY,
     DISP_EVT_MODEM_NET,
     DISP_EVT_MODEM_LOST,
@@ -58,6 +58,7 @@ typedef struct {
     DisplayEventType type;
     const char *payload;
 } DisplayEvent;
+
 
 // Command buffer for display
 #define CMD_BUFFER_SIZE 256
@@ -89,7 +90,6 @@ extern CommandBuffer cmd_buffer;
 // modem
 extern bool modem_ready; // Modem is ready to recive data
 extern bool modem_net; // Modem has proved that it can respond and network status home or roaming (not literally on the network, this naming convention can be confusing)
-//extern bool modem_powered; 
 extern uint8_t modem_mode;
 extern int sms_count; 
 extern int sms_unread_count; // Actual new incoming message count via URC
@@ -100,23 +100,8 @@ extern bool sms_read;
 extern bool sms_read_all;
 extern bool at_mode;
 extern bool gnss_mode;
+extern int gnss_update_count;
 extern bool http_mode;
-//extern bool wifi_mode;
-
-// Wifi
-/*
-typedef struct {
-    bool wifi_on;
-    bool wifi_scan;
-    bool wifi_connected;
-    char ssid[32];
-    char password[64];
-    bool wifi_host;
-    // Add hostname etc for hosting capabilities in the future
-    SemaphoreHandle_t mutex;
-} WifiData;
-extern WifiData wifi_data;
-*/
 
 
 // Selectable/Scaleable/Programmable poll rate for each type of data collection. Changed in command.cpp /pr x 1=low, 2=med, 3=high from each respective polling mode wizard
@@ -125,6 +110,8 @@ typedef enum {
     POLL_RATE_MEDIUM,
     POLL_RATE_HIGH,
 } PollRate;
+
+extern bool polling_rate_changed;
 
 // GNSS
 typedef struct {

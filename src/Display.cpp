@@ -20,7 +20,6 @@ PageType current_page = PAGE_NONE;
 PageType last_page = PAGE_NONE;
 bool modem_ready = false;
 bool modem_net = false;
-//bool modem_powered = false;
 uint8_t modem_mode = 1;   // Default text mode not PDU mode
 bool sms_send = false;
 bool sms_read = false;
@@ -30,11 +29,11 @@ int sms_unread_count = 0;
 int sms_ids[10] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
 bool at_mode = false;
 bool gnss_mode = false;
-//bool wifi_mode = false;
+int gnss_update_count = 0;
 bool http_mode = false;
+bool polling_rate_changed = false;
 CommandBuffer cmd_buffer = {0};
 GNSSData gnss_data = {0};
-//WifiData wifi_data = {0};
 SignalData signal_data = {0};
 // Private
 // Screen
@@ -49,7 +48,7 @@ static uint32_t display_h = 0;
 static SemaphoreHandle_t epd_mutex = NULL;
 static QueueHandle_t dispQueue = NULL;
 static TaskHandle_t display_task_handle = NULL;
-static uint32_t idle_timeout_ms = 60000; //One minute
+static uint32_t idle_timeout_ms = 90000; // minute and a half
 static int idle_timeout_count = 0; 
 static TickType_t last_activity_tick = 0;
 static uint32_t idle_page_tick_count = 0;
@@ -63,6 +62,74 @@ static char idle_c[2] = {0};
 void SetLastActivityTick(void) {
     last_activity_tick = xTaskGetTickCount();
     idle_timeout_count = 0; // Reset idle timeout count on activity
+}
+
+// Reset signal_data to unknown values (for display) on modem lost or reset (for modem) to allow fallback network logic
+void SignalData_Reset(void) {
+    if (signal_data.mutex && xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        signal_data.rxlev = 99;
+        signal_data.ber = 99;
+        signal_data.rscp = 255;
+        signal_data.ecno = 255;
+        signal_data.rsrq = 255;
+        signal_data.rsrp = 255;
+        signal_data.poll_rate = POLL_RATE_MEDIUM;
+        xSemaphoreGive(signal_data.mutex);
+    }
+}
+
+// Reset gnss_data to default values and set gnss_update_count to 0
+void GnssData_Reset(void) {
+    if (gnss_data.mutex && xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        gnss_data.latitude = 0.0;
+        gnss_data.longitude = 0.0;
+        gnss_data.altitude[0] = '\0';
+        gnss_data.speed[0] = '\0';
+        gnss_data.time[0] = '\0';
+        gnss_data.date[0] = '\0';
+        gnss_data.gnss_on = false;
+        gnss_data.poll_rate = POLL_RATE_MEDIUM;
+        xSemaphoreGive(gnss_data.mutex);
+    }
+    gnss_update_count = 0;
+}
+
+// Change internal polling rate selection for gnss_data and or signal_data depending on which one is NULL, Takes new polling rate to be set returns true if success
+bool ChangePollingRate(bool gnss, bool signal, PollRate new_rate) {
+    if (!gnss && !signal || !new_rate) return false;
+    bool gnss_ok = false;
+    bool signal_ok = false;
+    if (gnss && gnss_data.mutex && xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        gnss_data.poll_rate = new_rate;
+        xSemaphoreGive(gnss_data.mutex);
+        gnss_ok = true;
+    } 
+    if (signal && signal_data.mutex && xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        signal_data.poll_rate = new_rate;
+        xSemaphoreGive(signal_data.mutex);
+        signal_ok = true;
+    }
+    if ((gnss && gnss_ok) || (signal && signal_ok)) {
+        polling_rate_changed = true;
+        return true;
+    }
+    return false;
+}
+
+// Reset all public modes back to default if modem is lost or reset
+void ResetGlobalModeState(void) {
+    // AT
+    at_mode = false;
+    // SMS
+    sms_send = false;
+    sms_read = false;
+    sms_read_all = false;
+    sms_count = 0;
+    sms_unread_count = 0;
+    // GNSS
+    gnss_mode = false;
+    // HTTP
+    http_mode = false;
 }
 
 // Returns the image buffer size for a given gray mode
@@ -115,11 +182,6 @@ static void paintHomeScreen(void) {
     else if (gnss_mode) {
         snprintf(buf, sizeof(buf), "Mode: GNSS");
     }
-    /*
-    else if (wifi_mode) {
-        snprintf(buf, sizeof(buf), "CMD Mode: WiFi", at_mode);
-    }
-        */
     else if (http_mode) {
         snprintf(buf, sizeof(buf), "Mode: HTTP");
     }
@@ -159,30 +221,6 @@ static void paintHomeScreen(void) {
     }
     Paint_DrawString_EN(10, 155, buf, &Font24, BLACK, WHITE);
 
-    /*
-    // WiFi
-    if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
-        if (wifi_data.wifi_on) {
-            Paint_DrawString_EN(10, 120, "WiFi +", &Font16, BLACK, WHITE);
-            Paint_DrawString_EN(15, 140, "Idle", &Font16, WHITE, BLACK);
-            if (wifi_data.wifi_connected) {
-                Paint_DrawString_EN(10, 120, "WiFi ++", &Font16, BLACK, WHITE);
-                Paint_DrawString_EN(15, 140, "Connected: SSID", &Font16, WHITE, BLACK);
-            } else if (wifi_data.wifi_scan) {
-                Paint_DrawString_EN(10, 120, "WiFi ++", &Font16, BLACK, WHITE);
-                Paint_DrawString_EN(15, 140, "Scanning...", &Font16, WHITE, BLACK);
-            } else if (wifi_data.wifi_host) {
-                Paint_DrawString_EN(10, 120, "WiFi ++", &Font16, BLACK, WHITE);
-                Paint_DrawString_EN(15, 140, "Hosting: SSID", &Font16, WHITE, BLACK);
-            }
-        } else {
-            Paint_DrawString_EN(10, 120, "WiFi -", &Font16, BLACK, WHITE);
-        }
-        xSemaphoreGive(wifi_data.mutex);
-    } else {
-        Paint_DrawString_EN(10, 120, "WiFi ?", &Font16, BLACK, WHITE);
-    }
-        */
 
     // Parse signal type and corresponding strength
     if (xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
@@ -266,6 +304,9 @@ static void paintHomeScreen(void) {
         memset(result, 0, sizeof(result));
         snprintf(result, sizeof(result), "Spd K: %s", gnss_data.speed);
         Paint_DrawString_EN(display_w - 10 - (Font16.Width * strlen(result)), 160, result, &Font16, WHITE, BLACK);
+
+        // Reset gnss_update_count on successful update to track when we have a new gnss update for dynamic window page
+        gnss_update_count = 0;
         xSemaphoreGive(gnss_data.mutex);
     }
 }
@@ -282,9 +323,9 @@ static void paintDynamicScreen(void) {
     paintConfigureForMode(4);
     Paint_Clear(WHITE);
     Paint_DrawLine(1, 20, display_w-1, 20, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
-    Paint_DrawString_EN(5, 5, "Dynamic Window", &Font16, WHITE, BLACK);
-    Paint_DrawString_EN(5+(Font12.Width * 16), 5, "123", &Font12, WHITE, BLACK);
+    Paint_DrawString_EN(5, 4, "# Dynamic Window #", &Font16, WHITE, BLACK);
 
+    // All dynamic content is handled in Display_HandlePartialUpdate 
 }
 static void paintBootScreen(void) {
     paintConfigureForMode(4);
@@ -300,14 +341,16 @@ static void paintBootScreen(void) {
     Paint_DrawCircle(105, 95, 20, WHITE, DOT_PIXEL_1X1, DRAW_FILL_FULL);
     Paint_DrawLine(85, 95, 125, 95, BLACK, DOT_PIXEL_1X1, LINE_STYLE_DOTTED);
     Paint_DrawLine(105, 75, 105, 115, BLACK, DOT_PIXEL_1X1, LINE_STYLE_DOTTED);
-    Paint_DrawString_EN(10, 5, "Tele-Ink v0.3.2", &Font16, BLACK, WHITE);
+    Paint_DrawString_EN(10, 5, "Tele-Ink v0.3.5", &Font16, BLACK, WHITE);
     Paint_DrawString_EN(10, 20, "By: Logan Puntous", &Font12, WHITE, BLACK);
-    Paint_DrawNum(10, 33, 123456789, &Font12, BLACK, WHITE);
-    Paint_DrawNum(10, 50, 987654321, &Font16, WHITE, BLACK);
-    Paint_DrawString_EN(10, 150, "Use SYM key to change modes", &Font24, BLACK, GRAY1);
-    Paint_DrawString_EN(10, 175, "In command mode use  /<cmd>", &Font24, WHITE, GRAY2);
-    Paint_DrawString_EN(10, 200, "HTTP GET/POST support /html", &Font24, WHITE, GRAY3);
-    Paint_DrawString_EN(10, 225, "Global Roaming GNSS 4G Data", &Font24, WHITE, GRAY4);
+    Paint_DrawString_EN(10, 33, "Date: 5/22/26", &Font12, BLACK, WHITE);
+    Paint_DrawString_EN(10, 50, "ESP32 <-> SIM7600G-H", &Font16, WHITE, BLACK);
+    Paint_DrawString_EN(10, 130, "Global Roaming 4G+ LTE Data", &Font24, BLACK, GRAY1);
+    Paint_DrawString_EN(10, 155, "SYM+(key) for major updates", &Font24, WHITE, GRAY4);
+    Paint_DrawString_EN(10, 180, "In CMD mode use $/<command>", &Font24, WHITE, GRAY3);
+    Paint_DrawString_EN(10, 205, "Modes: AT+, SMS, GNSS, HTTP", &Font24, WHITE, GRAY2);
+    Paint_DrawString_EN(10, 230, "Copyright (c) 2026 Logan P.", &Font24, BLACK, GRAY1);
+
 }
 // Paint the current page based on internal state using specifc paint function
 static void paintCurrentPage(void) {
@@ -437,7 +480,7 @@ static void Display_HandleScreenChange(void) {
     EPD_3IN7_4Gray_Display(image_buf4);
     
     // Start partial updates if needed
-    if (current_page == PAGE_IDLE || current_page == PAGE_COMMAND) {
+    if (current_page == PAGE_IDLE || current_page == PAGE_COMMAND || current_page == PAGE_DYNAMIC_WINDOW) {
         // Switch to 1 gray for partial updates
         printf("Initializing 1Gray mode HSC\r\n");
         EPD_3IN7_1Gray_Init();
@@ -483,9 +526,7 @@ static void HandlePartialUpdate_command(void) {
         snprintf(display_line, sizeof(display_line), "AT%s_", current_input);
     } else if (gnss_mode) {
         snprintf(display_line, sizeof(display_line), "GNSS: %s_", current_input);
-    } /*else if (wifi_mode) {
-        snprintf(display_line, sizeof(display_line), "WiFi: %s_", current_input);
-    } */
+    } 
     else if (http_mode) {
         snprintf(display_line, sizeof(display_line), "HTTP: %s_", current_input);
     }
@@ -688,8 +729,59 @@ static void HandlePartialUpdate_idle(void) {
     prev_ry = ry;
 }
 
+// Determines what content to show in the dynamic window if there is a refresh requested
+static void HandlePartialUpdate_DynamicWindow(const char* mode) {
+    char buf[64] = {0};
+    snprintf(buf, sizeof(buf), "# Dynamic Window #   (%s)   * Active *", mode);
+    Paint_DrawString_EN(5, 4, buf, &Font16, WHITE, BLACK);
+    
+    // Update dynamic content based on mode
+    if (strcmp(mode, "GNSS") == 0) {
+        // Display changing GNSS data in dynamic region
+        if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+            char result[64] = {0};
+            if (gnss_data.time[0] != '\0') {
+                snprintf(result, sizeof(result), "Time: %s", gnss_data.time);
+                Paint_DrawString_EN(60, 60, result, &Font24, WHITE, BLACK);
+                memset(result, 0, sizeof(result));
+                snprintf(result, sizeof(result), "Date: %s", gnss_data.date);
+                Paint_DrawString_EN(60, 90, result, &Font24, WHITE, BLACK);
+                memset(result, 0, sizeof(result));
+                snprintf(result, sizeof(result), "Lat: %.6f", gnss_data.latitude);
+                Paint_DrawString_EN(60, 120, result, &Font24, WHITE, BLACK);
+                memset(result, 0, sizeof(result));
+                snprintf(result, sizeof(result), "Lon: %.6f", gnss_data.longitude);
+                Paint_DrawString_EN(60, 150, result, &Font24, WHITE, BLACK);
+                memset(result, 0, sizeof(result));
+                snprintf(result, sizeof(result), "Alt M: %s", gnss_data.altitude);
+                Paint_DrawString_EN(60, 180, result, &Font24, WHITE, BLACK);
+                memset(result, 0, sizeof(result));
+                snprintf(result, sizeof(result), "Spd K: %s", gnss_data.speed);
+                Paint_DrawString_EN(60, 210, result, &Font24, WHITE, BLACK);
+            } else {
+                Paint_DrawString_EN(60, 50, "GNSS Unavailable", &Font24, WHITE, BLACK);
+            }
+            xSemaphoreGive(gnss_data.mutex);
+        } 
+    }
+    else if (strcmp(mode, "HTTP") == 0) {
+        // Display changing HTTP data in dynamic region (placeholder)
+        Paint_DrawString_EN(10, 50, "No HTTP Data", &Font24, WHITE, BLACK);
+    }   
+    else if (strcmp(mode, "MAP") == 0) {
+        // Display changing MAP data in dynamic region (placeholder)
+        Paint_DrawString_EN(10, 50, "No MAP Data", &Font24, WHITE, BLACK);
+    }
+    else {
+        // Unknown mode
+        Paint_DrawString_EN(10, 50, "Unknown Mode", &Font24, WHITE, BLACK);
+    }
+
+    EPD_3IN7_1Gray_Display(image_buf1);
+}
+
 // Handle partial updates for current page (drawing and displaying)
-static void Display_HandlePartialUpdate(void) {
+static void Display_HandlePartialUpdate(const char* mode) {
     paintConfigureForMode(1);
     Paint_Clear(WHITE);
 
@@ -699,6 +791,9 @@ static void Display_HandlePartialUpdate(void) {
     else if (current_page == PAGE_IDLE) {
         HandlePartialUpdate_idle();
     }
+    else if (current_page == PAGE_DYNAMIC_WINDOW) {
+        HandlePartialUpdate_DynamicWindow(mode);
+    }
     else {
         printf("No partial update\r\n");
         DEV_Delay_ms(20);
@@ -706,81 +801,63 @@ static void Display_HandlePartialUpdate(void) {
     }
 }
 
-// Reset signal_data to unknown values (for display) on modem lost or reset (for modem) to allow fallback network logic
-void SignalData_Reset(void) {
-    if (signal_data.mutex && xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        signal_data.rxlev = 99;
-        signal_data.ber = 99;
-        signal_data.rscp = 255;
-        signal_data.ecno = 255;
-        signal_data.rsrq = 255;
-        signal_data.rsrp = 255;
-        gnss_data.poll_rate = POLL_RATE_MEDIUM;
-        xSemaphoreGive(signal_data.mutex);
+
+// Handles refresh logic for partial updates based on current page and gray mode every ~500ms
+// Determines when the screen refreshes depending on current page, state, and partial_update_count to balance between ghosting and responsiveness
+// CURRENTLY ONLY HANDLES SCHEDULED REFRESHES
+static void Display_HandleRefreshTiming() {
+    if (GRAY_MODE != 1 || !screen_on) {
+        return;
     }
+    
+    // Scheduled refresh every 500ms in COMMAND page (manual full refresh by user)
+    if (current_page == PAGE_COMMAND && xSemaphoreTake(epd_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        Display_HandlePartialUpdate("NONE");
+        xSemaphoreGive(epd_mutex);
+        return;
+    }
+
+    // Scheduled refresh every 500ms in IDLE page (full refreshes every 120 partial updates to prevent burn in)
+    if (current_page == PAGE_IDLE && xSemaphoreTake(epd_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        if (partial_update_count >= 120) {
+            Display_UpdateFullScreen();
+            partial_update_count = 0;
+        } else {
+            Display_HandlePartialUpdate("NONE");
+            ++partial_update_count;
+        }
+        xSemaphoreGive(epd_mutex);
+        return;
+    }
+
+    // Unscheduled refresh in DYNAMIC_WINDOW page to update changing content (manual full refresh by user)
+    if (current_page == PAGE_DYNAMIC_WINDOW) {
+        // GNSS DYNAMIC MODE
+        if (gnss_mode) {
+            // Check if GNSS is active before refreshing
+            if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+                if (!gnss_data.gnss_on) return;
+                xSemaphoreGive(gnss_data.mutex);
+            } 
+
+            // Display as fast as the updates exist and 
+            if (gnss_update_count > 0) {
+                Display_HandlePartialUpdate("GNSS");
+                gnss_update_count = 0;
+            } 
+        }
+
+        // HTTP DYNAMIC MODE
+        if (http_mode) {
+            // Display relevant information
+        }
+
+
+        return;
+    }
+
 }
 
-// Reset gnss_data to default values 
-void GnssData_Reset(void) {
-    if (gnss_data.mutex && xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        gnss_data.latitude = 0.0;
-        gnss_data.longitude = 0.0;
-        gnss_data.altitude[0] = '\0';
-        gnss_data.speed[0] = '\0';
-        gnss_data.time[0] = '\0';
-        gnss_data.date[0] = '\0';
-        gnss_data.gnss_on = false;
-        gnss_data.poll_rate = POLL_RATE_MEDIUM;
-        xSemaphoreGive(gnss_data.mutex);
-    }
-}
-
-// Change internal polling rate selection for gnss_data and or signal_data depending on which one is NULL, Takes new polling rate to be set returns true if success
-bool ChangePollingRate(bool gnss, bool signal, PollRate new_rate) {
-    if (!gnss && !signal) return false;
-    if (gnss && gnss_data.mutex && xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        gnss_data.poll_rate = new_rate;
-        xSemaphoreGive(gnss_data.mutex);
-    }
-    if (signal && signal_data.mutex && xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        signal_data.poll_rate = new_rate;
-        xSemaphoreGive(signal_data.mutex);
-    }
-    return true;
-}
-
-// Reset all public modes back to default if modem is lost or reset
-void ResetGlobalModeState(void) {
-    // AT
-    at_mode = false;
-    // SMS
-    sms_send = false;
-    sms_read = false;
-    sms_read_all = false;
-    sms_count = 0;
-    sms_unread_count = 0;
-    // GNSS
-    gnss_mode = false;
-    /*
-    if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        gnss_data.gnss_on = false;
-        xSemaphoreGive(gnss_data.mutex);
-    }
-        */
-    // Wifi
-    /*
-    wifi_mode = false;
-    if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        wifi_data.wifi_on = false;
-        wifi_data.wifi_connected = false;
-        wifi_data.wifi_scan = false;
-        wifi_data.wifi_host = false;
-        xSemaphoreGive(wifi_data.mutex);
-    }
-    */
-    // HTTP
-    http_mode = false;
-}
 
 // Display task consumes display events from queue to update internal state and update screen or polls for partial updates and idle timeout to show idle screen, runs indefinitely 
 static void displayTask(void *pv) {
@@ -808,10 +885,9 @@ static void displayTask(void *pv) {
                 case DISP_EVT_SHOW_COMMAND: setPage(PAGE_COMMAND); page_change_evt = true; break;
                 case DISP_EVT_SHOW_IDLE: setPage(PAGE_IDLE); page_change_evt = true; break;
                 case DISP_EVT_SHOW_DYNAMIC_WINDOW: setPage(PAGE_DYNAMIC_WINDOW); page_change_evt = true; break;
-                /*case DISP_EVT_MODEM_POWERED: modem_powered = true; break;*/
-                case DISP_EVT_MODEM_READY: modem_ready = true; /*modem_powered = true;*/ break;
-                case DISP_EVT_MODEM_NET: modem_ready = true; /*modem_powered = true;*/ modem_net = true; break;
-                case DISP_EVT_MODEM_LOST: modem_ready = false; modem_net = false; SignalData_Reset(); GnssData_Reset(); ResetGlobalModeState(); break;
+                case DISP_EVT_MODEM_READY: modem_ready = true; break;
+                case DISP_EVT_MODEM_NET: modem_ready = true; modem_net = true; break;
+                case DISP_EVT_MODEM_LOST: modem_ready = false; modem_net = false; ResetGlobalModeState(); SignalData_Reset(); GnssData_Reset(); break;
                 case DISP_EVT_SMS_RECEIVED: sms_unread_count++; break;
             }
 
@@ -842,24 +918,11 @@ static void displayTask(void *pv) {
             xSemaphoreGive(epd_mutex);
         }
 
-        
-        //Partial update every 500ms (internal epd limit for 1gray_display) or repaint for ghosting every ~2 minutes
-        if (GRAY_MODE == 1 && screen_on) {
-            if (xSemaphoreTake(epd_mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
-                if (partial_update_count >= 120) {
-                    if (current_page == PAGE_IDLE) {
-                        Display_UpdateFullScreen();
-                    }
-                    partial_update_count = 0;
-                } else {
-                    Display_HandlePartialUpdate();
-                    ++partial_update_count;
-                }
-                xSemaphoreGive(epd_mutex);
-            }
-            SetLastActivityTick();
-        } 
-        
+        // Handles timing logic on partial updates and scheduled full screen refreshes
+        // Default: scheduled refresh every 500ms regardless of data updates
+        // New mode: only refresh for a specific reason (new data, longer refresh time, keyboard input, cmd_buffer.state, etc)
+        Display_HandleRefreshTiming();
+
         // Low activity counter
         if (screen_on && current_page != PAGE_IDLE && (xTaskGetTickCount() - last_activity_tick) >= pdMS_TO_TICKS(idle_timeout_ms)) {
             printf("Activity low in displayTask.\r\n");
@@ -904,7 +967,6 @@ void Display_Init(void) {
     cmd_buffer.history_count = 0;
     cmd_buffer.input_history_count = 0;
     cmd_buffer.state = CMD_STATE_IDLE;
-    
     // Set signal to unkown values manually to start
     // Mutex isnt created yet becuase this task starts before modemTask
     signal_data.rxlev = 99;
@@ -923,23 +985,6 @@ void Display_Init(void) {
     gnss_data.date[0] = '\0';
     gnss_data.poll_rate = POLL_RATE_MEDIUM;
 
-    // Create mutex and Set wifi to unkown values to start
-    /*
-    if (!wifi_data.mutex) {
-        wifi_data.mutex = xSemaphoreCreateMutex();
-        if (!wifi_data.mutex) {
-            printf("ERROR: Failed to create wifi_data mutex in display!\r\n");
-            return;
-        }
-    }
-    wifi_data.wifi_on = false;
-    wifi_data.wifi_scan = false;
-    wifi_data.wifi_connected = false;
-    wifi_data.ssid[0] = '\0';
-    wifi_data.password[0] = '\0';
-    wifi_data.wifi_host = false;
-
-    */
 
     // Init EPD
     EPD_3IN7_4Gray_Init();

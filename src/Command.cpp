@@ -2,7 +2,6 @@
 // For public queue/buffer
 #include "Display.h"
 #include "Modem.h"
-//#include "ESP32_WiFi.h"
 #include <stdio.h>
 // FD
 #include <string.h>
@@ -127,6 +126,10 @@ static void SetSmsNumbers(char* id_str, const int* ids, int num) {
 
 // Wizard for handling sending sms messages when in sms_send mode
 static void SMS_SEND_Wizard(char *in) {
+    if (strcmp(in, "help") == 0) {
+        Command_SetDone("SMS S: <message>, /exit");
+        return;
+    }
     if (strcmp(in, "/exit") == 0) {
         Command_SetDone("Exiting SMS send");
         sms_send = false;
@@ -144,6 +147,10 @@ static void SMS_SEND_Wizard(char *in) {
 
 // Wizard for handling reading unread/all messages and responding/deleting when in sms_read mode
 static void SMS_READ_Wizard(char *in) {
+    if (strcmp(in, "help") == 0) {
+        Command_SetDone("SMS R: id, /s, /da, /d id, /exit");
+        return;
+    }
     // No messages to read left from unread and not responding
     if (sms_count <= 0 && strcmp(in, "/s") != 0) {
         Command_SetDone("Exiting: No SMS to read");
@@ -330,6 +337,10 @@ static bool Command_SetPollingRate(bool gnss, bool signal, char *in) {
 
 // Wizard for handling gnss mode inputs.
 static void GNSS_Wizard(char *in) {
+    if (strcmp(in, "help") == 0) {
+        Command_SetDone("GNSS: on/off/info/poll/exit");
+        return;
+    }
     bool was_on = false;
     if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
         was_on = gnss_data.gnss_on;
@@ -350,6 +361,7 @@ static void GNSS_Wizard(char *in) {
     }
     char gnss_info[512] = {0};
     gnss_info[0] = '\0';
+
     if (strncmp(in, "on", 2) == 0) {
         if (was_on) {
             Command_SetDone("Error: GNSS is allready on");
@@ -426,7 +438,11 @@ static void HTTP_Wizard(char *in) {
         http_mode = false;
         return;
     }
-    if (strncmp(in, "get ", 4) == 0) {
+    if (strncmp(in, "help", 4) == 0) {
+        Command_SetDone("HTTP: get/post/list/test/lrp");
+        return;
+    }
+    else if (strncmp(in, "get ", 4) == 0) {
         ModemHttpRequest req;
         req.method = MODEM_HTTP_GET;
         req.url = in + 4;
@@ -483,161 +499,6 @@ static void HTTP_Wizard(char *in) {
     return;
 }
 
-// Wizard for WiFi handling (under costruction) (only one mode at a time)
-/*
-static void WiFi_Wizard(char *in) {
-    // Edit wifi_mode even if wifi is still on
-    if (strcmp(in, "/exit") == 0) {
-        Command_SetDone("Exiting WiFi mode");
-        wifi_mode = false;
-        return;
-    }
-    bool was_on = false;
-    bool was_scan = false;
-    bool was_connected = false;
-    bool was_host = false;
-    // Try to take wifi_data mutex to copy state and return if cant so further take/gives are safe(ish)
-    if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        was_on = wifi_data.wifi_on;
-        was_scan = wifi_data.wifi_scan;
-        was_connected = wifi_data.wifi_connected;
-        was_host = wifi_data.wifi_host;
-        xSemaphoreGive(wifi_data.mutex);
-    } else {
-        Command_SetDone("Error: Cant take WiFi mutex");
-        return;
-    }
-    // Stop all wifi modes immediately via WiFi library
-    if (strncmp(in, "stop", 4) == 0) {
-        if (!was_on) {
-            Command_SetDone("Error: Wifi is off allready");
-            return;
-        }
-        if (was_scan) {
-            if (WiFi_StopScanner()) {
-                if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-                    wifi_data.wifi_scan = false;
-                    wifi_data.wifi_on = false;
-                    xSemaphoreGive(wifi_data.mutex);
-                } else {
-                    Command_SetDone("Error: Cant take WiFi mutex");
-                    return;
-                }
-                Command_SetDone("Stopped WiFi scanning");
-                return;
-            }
-            else {
-                Command_SetDone("Error: Cant stop scanner");
-                return;
-            }
-        }
-        
-        else if (was_connected) {
-            if (WiFi_Disconnect()) {
-                if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-                    wifi_data.wifi_connected = false;
-                    xSemaphoreGive(wifi_data.mutex);
-                } else {
-                    Command_SetDone("Error: Cant take WiFi mutex");
-                    return;
-                }
-                Command_SetDone("Disconnected!");
-                return;
-            }
-            else {
-                Command_SetDone("Error: Couldnt disconnect");
-                return;
-            }
-        }
-        
-        else if (was_host) {
-            if (WiFi_StopHost()) {
-                if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-                    wifi_data.wifi_host = false;
-                    wifi_data.wifi_on = false;
-                    xSemaphoreGive(wifi_data.mutex);
-                } else {
-                    Command_SetDone("Error: Cant take WiFi mutex");
-                    return;
-                }
-                Command_SetDone("Stopped hosting");
-                return;
-            } 
-            else {
-                Command_SetDone("Error: Couldnt stop host");
-                return;
-            }
-        } 
-        else {
-            Command_SetDone("Error: Unknown wifi state");
-        }
-        return;
-    }
-    // Wifi Scanning mode activation
-    if (strncmp(in, "scan", 4) == 0) {
-        if (WiFi_StartScanner(30000)) {
-            if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-                wifi_data.wifi_on = true;
-                wifi_data.wifi_scan = true;
-                xSemaphoreGive(wifi_data.mutex);
-            } else {
-                Command_SetDone("Error: Cant take WiFi mutex");
-                return;
-            }
-            Command_SetDone("WiFi scan started...");
-        } 
-        else {
-            Command_SetDone("Error: WiFi scan failed");
-        }
-        return;
-    }
-    else if (strncmp(in, "connect", 7) == 0) {
-        Command_SetDone("Error: No connecting yet");
-        return;
-    }
-    else if (strncmp(in, "host", 4) == 0) {
-        if (WiFi_StartHost("Tele-Ink-AP", "password123")) {
-            if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-                wifi_data.wifi_on = true;
-                wifi_data.wifi_host = true;
-                xSemaphoreGive(wifi_data.mutex);
-            } else {
-                Command_SetDone("Error: Cant take WiFi mutex");
-                return;
-            }
-            Command_SetDone("WiFi Soft AP started...");
-        } 
-        else {
-            Command_SetDone("Error: Soft AP failed");
-        }
-        return;
-    }
-    else {
-        Command_SetDone("Error: Not a valid WiFi cmd");
-    }
-    return;
-}
-
-*/
-
-/*
-// Helper to return true if wifi state is showing "off" or sets command done with an error and returns false
-static bool WiFiOff() {
-    if (xSemaphoreTake(wifi_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        if (wifi_data.wifi_on) {
-            xSemaphoreGive(wifi_data.mutex);
-            Command_SetDone("Error: Turn WiFi off first");
-            return false;
-        }
-        xSemaphoreGive(wifi_data.mutex);
-    } else {
-        Command_SetDone("Error: Cant take WiFi mutex");
-        return false;
-    }
-    return true;
-}
-    */
-
 
     
 // Helper to return true if gnss state is showing "off" or sets command done with an error and returns false
@@ -678,9 +539,9 @@ void Command_Handle(void){
     TrimRight(in);
 
     /* YOUR A WIZARD 
-     * Handles non base case $ command modes like GNSS, SMS, WIFI etc
+     * Handles non base case $ command modes like GNSS, SMS, etc
      * And check multi-line command mode first before handling base $
-     * EX: my prompt for a ssid and password in seperate calls for one single command action when connecting to wifi 
+     * EX: my prompt for a ssid and password in seperate calls for one single command action 
     */
 
     // Send sms once collected number and message
@@ -707,14 +568,7 @@ void Command_Handle(void){
         HTTP_Wizard(in);
         return;
     }
-    // WiFi Wizard for scanning connecting and hosting (need to build more)
-    /*
-    else if (wifi_mode) {
-        WiFi_Wizard(in);
-        return;
-    }
-        */
-
+   
     // No wizardry needed so continue with muggle input
 
     // PARSE default $ INPUT
@@ -730,7 +584,7 @@ void Command_Handle(void){
     // If else tree of doom that can select mode or exectute specific commands
     // Help menu
     if (strcmp(in, "/help") == 0 || strcmp(in, "/h") == 0) {
-        Command_SetDone("CMDS: /at /gnss /sms /http /sim /esp /clear");
+        Command_SetDone("/at /gnss /sms /http /sim /esp /clear");
         return;
     } 
     // Clear history
@@ -741,9 +595,12 @@ void Command_Handle(void){
     }
     // ESP control
     else if (strncmp(in, "/esp", 4) == 0) {
-        if (strcmp(in, "/esp rst") == 0) {
-            Modem_TogglePWK(3000);
-            DEV_Delay_ms(8000);
+        if (strcmp(in, "/esp help") == 0) {
+            Command_SetDone("ESP: rst");
+            return;
+        }
+        else if (strcmp(in, "/esp rst") == 0) {
+            // Might need to change PWK off of strapping GPIO4 so boot doesnt pull PWK low
             ESP.restart();
         } else {
             Command_SetDone("Error: Unknown ESP command");
@@ -752,7 +609,11 @@ void Command_Handle(void){
     }
     // Modem external control
     else if (strncmp(in, "/sim", 4) == 0) {
-        if (strcmp(in, "/sim on") == 0) {  
+        if (strcmp(in, "/sim help") == 0) {
+            Command_SetDone("SIM: on/off/rst/net/info/poll");
+            return;
+        }
+        else if (strcmp(in, "/sim on") == 0) {  
             if (!modem_ready) {
                 Modem_TogglePWK(1200);
                 Command_SetDone("Toggled pwk for modem ON");
@@ -768,7 +629,8 @@ void Command_Handle(void){
         else if (strcmp(in, "/sim off") == 0) {  
             if (modem_ready) {
                 Modem_TogglePWK(3000);
-                //ResetGlobalModeState();
+                SignalData_Reset();
+                GnssData_Reset();
                 Command_SetDone("Toggled pwk for modem OFF");
             } else {
                 Command_SetDone("Error: Modem is OFF");
@@ -776,7 +638,8 @@ void Command_Handle(void){
             return;
         } else if (strcmp(in, "/sim rst") == 0) {  
             if (modem_ready) {
-                ResetGlobalModeState();
+                SignalData_Reset();
+                GnssData_Reset();
                 Modem_Restart();
                 Command_SetDone("Restarted modem");
             } else {
@@ -787,7 +650,7 @@ void Command_Handle(void){
         else if (strcmp(in, "/sim net") == 0) {
             if (modem_ready) {
                 char tmp[256] = {0};
-                Modem_SendAT("AT+CREG?", NULL, tmp, sizeof(tmp), 5000);
+                Modem_SendAT("AT+COPS?", NULL, tmp, sizeof(tmp), 5000);
                 ReplaceControlChars(tmp);
                 Command_SetDone(tmp);
             } else {
@@ -815,20 +678,22 @@ void Command_Handle(void){
             return;
         }
         else {
-            Command_SetDone("Error: Unknown SIM command");
+            Command_SetDone("Error: /sim help for commands");
         }
         return;
     }
     // Start modem sms wizard /sms <number> 
     else if (strncmp(in, "/sms", 4) == 0) {
+        if (strcmp(in, "/sms help") == 0) {
+            Command_SetDone("SMS: /sms (ra/ru/s) <number>");
+            return;
+        }
         if (!modem_ready){
             Command_SetDone("Error: Modem is not ready");
             return;
         }
         // Make sure GNSS is off first
         if (!GNSSOff()) return;
-        // Make sure WiFi is off first
-        //if (!WiFiOff()) return;
         // Enable text mode
         char tmp[512] = {0};
         if (!Modem_SetCheckMode(1)){
@@ -882,7 +747,7 @@ void Command_Handle(void){
                 Command_SetDone(out);
                 return;
             } else {
-                Command_SetDone("Error: Unknown SMS command");
+                Command_SetDone("Error: Unknown SMS R command");
                 return;
             }
         }
@@ -914,7 +779,7 @@ void Command_Handle(void){
             return;
         } 
         
-        Command_SetDone("SMS: /sms ra/ru/s <number>");
+        Command_SetDone("Error: Unknown SMS command");
         return;
     }
     // Raw AT command - /AT <command> --> Modem_SendAT(<command>)
@@ -971,33 +836,9 @@ void Command_Handle(void){
         return;
     }
 
-    // WiFi wizard entry (not fully implemented)
-    /*
-    else if (strcmp(in, "/wifi") == 0) {
-        if (!modem_ready) {
-            Command_SetDone("Error: Modem is not ready");
-            return;
-        }
-        // Prompt user to turn off passive modes that can run in background that can pull a lot of current
-        // Not that it cant do it its just a lot of draw for PSU
-        if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-            if (gnss_data.gnss_on) {
-                Command_SetDone("Error: Turn GNSS off first");
-                xSemaphoreGive(gnss_data.mutex);
-                return;
-            }
-            xSemaphoreGive(gnss_data.mutex);
-        } else {
-            Command_SetDone("Error: Cant take GNSS mutex");
-            return;
-        }
-        wifi_mode = true;
-        Command_SetDone("scan, connect, host, stop");
-        return;
-    } 
-    */    
+    
     else {
-        Command_SetDone("Error: Unknown command");
+        Command_SetDone("Unknown command: use /help");
         return;
     }
 

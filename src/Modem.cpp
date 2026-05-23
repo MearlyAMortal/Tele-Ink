@@ -252,14 +252,16 @@ bool Modem_SendHttpRequest(const ModemHttpRequest *request, ModemHttpResponse *r
         return false;
     }
 
+    // Reset response
+    response->status_code = 0;
+    response->body[0] = '\0';
+
     int action_method = 0;
     int action_len = 0;
     char url_cmd[512] = {0};
     
     // Initilize http service
     char tmp[256] = {0};
-    response->status_code = 0;
-    response->body[0] = '\0';
 
     if (!Modem_SendAT("AT+HTTPINIT", NULL, tmp, sizeof(tmp), 5000)) {
         printf("HTTP: HTTPINIT failed\r\n");
@@ -566,6 +568,7 @@ void GNSS_ToOneLinerAndUpdate(const char *input, char *output, size_t out_size) 
     } else {
         printf("GNSS_ToOneLinerAndUpdate: failed to take gnss_data mutex\r\n");
     }
+    gnss_update_count++;
     // Requires user to repaint if they want current data rather than spamming fullscreen updates 
 }
 
@@ -594,16 +597,16 @@ static bool CESQ_ParseAndUpdate(const char *input) {
 
 static void Background_GetPollRates(int &status_ms, int &cesq_ms, int &gnss_ms) {
     if (!status_ms || !cesq_ms || !gnss_ms) return;
-    if (xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    if (xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
         status_ms = 30000 / int(signal_data.poll_rate);
-        cesq_ms = 120000 / int(signal_data.poll_rate);
+        cesq_ms = 180000 / int(signal_data.poll_rate);
         xSemaphoreGive(signal_data.mutex);
     } else {
         printf("Background_GetPollRates: failed to take background_poll_rate_mutex\r\n");
     }
-    if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
         if (gnss_data.poll_rate == POLL_RATE_HIGH) {
-            gnss_ms = 7000;
+            gnss_ms = 3000;
         } else if (gnss_data.poll_rate == POLL_RATE_MEDIUM) {
             gnss_ms = 18000;
         } else {
@@ -631,21 +634,29 @@ static void ModemBackgroundTask(void *pv) {
     TickType_t last_gnss_call = xTaskGetTickCount();
     TickType_t now = 0;
 
-    int poll_rate_gnss_ms = 15000;
-    int poll_rate_cesq_ms = 60000;
     int poll_rate_status_ms = 15000;
+    int poll_rate_cesq_ms = 90000;
+    int poll_rate_gnss_ms = 18000;
 
     for (;;) {
         now = xTaskGetTickCount();
 
+        // Update poll rates if they have changed in the display task
+        if (polling_rate_changed) {
+            DEV_Delay_ms(500); // Give display task time to update state before reading it
+            Background_GetPollRates(poll_rate_status_ms, poll_rate_cesq_ms, poll_rate_gnss_ms);
+            printf("Collected updated poll rates - Status: %dms, CESQ: %dms, GNSS: %dms\r\n", poll_rate_status_ms, poll_rate_cesq_ms, poll_rate_gnss_ms);
+            polling_rate_changed = false;
+        }
+
+
         // Status handling if enough time has passed since last check (15s)
         // Status check can be high blocking for modemTask but want responsive system diagnosis
         if (now - last_status_check >= pdMS_TO_TICKS(poll_rate_status_ms)) {
-            Background_GetPollRates(poll_rate_status_ms, poll_rate_cesq_ms, poll_rate_gnss_ms);
             if (Modem_CheckStatus()) {
                 printf("Modem status changed!\r\n");
                 // reset cesq and gnss timers to avoid spamming commands immediately on status change
-                last_cesq_call = now;
+                last_cesq_call = now - pdMS_TO_TICKS((poll_rate_cesq_ms * 17) / 18); // Check CESQ soon but not immediately
                 last_gnss_call = now;
             } 
             last_status_check = now;
