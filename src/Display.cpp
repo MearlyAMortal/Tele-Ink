@@ -18,8 +18,6 @@
 bool screen_on = false;
 PageType current_page = PAGE_NONE;
 PageType last_page = PAGE_NONE;
-bool modem_ready = false;
-bool modem_net = false;
 uint8_t modem_mode = 1;   // Default text mode not PDU mode
 bool sms_send = false;
 bool sms_read = false;
@@ -33,6 +31,7 @@ int gnss_update_count = 0;
 bool http_mode = false;
 bool polling_rate_changed = false;
 CommandBuffer cmd_buffer = {0};
+ModemState modem_state = {0};
 GNSSData gnss_data = {0};
 SignalData signal_data = {0};
 // Private
@@ -64,6 +63,17 @@ void SetLastActivityTick(void) {
     idle_timeout_count = 0; // Reset idle timeout count on activity
 }
 
+// Reset modem state to default values
+void ModemState_Reset(void) {
+    if (modem_state.mutex && xSemaphoreTake(modem_state.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        modem_state.capability = 0;
+        modem_state.poll_rate = POLL_RATE_MEDIUM;
+        xSemaphoreGive(modem_state.mutex);
+    } else {
+        printf("ModemState_Reset: failed to take modem_state mutex\r\n");
+    }
+}
+
 // Reset signal_data to unknown values (for display) on modem lost or reset (for modem) to allow fallback network logic
 void SignalData_Reset(void) {
     if (signal_data.mutex && xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
@@ -81,35 +91,41 @@ void SignalData_Reset(void) {
 // Reset gnss_data to default values and set gnss_update_count to 0
 void GnssData_Reset(void) {
     if (gnss_data.mutex && xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        gnss_data.gnss_on = false;
         gnss_data.latitude = 0.0;
         gnss_data.longitude = 0.0;
         gnss_data.altitude[0] = '\0';
         gnss_data.speed[0] = '\0';
         gnss_data.time[0] = '\0';
         gnss_data.date[0] = '\0';
-        gnss_data.gnss_on = false;
         gnss_data.poll_rate = POLL_RATE_MEDIUM;
         xSemaphoreGive(gnss_data.mutex);
     }
     gnss_update_count = 0;
 }
 
-// Change internal polling rate selection for gnss_data and or signal_data depending on which one is NULL, Takes new polling rate to be set returns true if success
-bool ChangePollingRate(bool gnss, bool signal, PollRate new_rate) {
-    if (!gnss && !signal || !new_rate) return false;
-    bool gnss_ok = false;
+// Change internal polling rate selection for status,signal,gsss depending on if their bool is set to true, Takes new polling rate to be set returns true if success
+bool ChangePollingRate(bool status, bool signal, bool gnss, PollRate new_rate) {
+    if (!gnss && !signal && !status|| !new_rate) return false;
+    bool status_ok = false;
     bool signal_ok = false;
-    if (gnss && gnss_data.mutex && xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        gnss_data.poll_rate = new_rate;
-        xSemaphoreGive(gnss_data.mutex);
-        gnss_ok = true;
-    } 
+    bool gnss_ok = false;
+    if (status && modem_state.mutex && xSemaphoreTake(modem_state.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        modem_state.poll_rate = new_rate;
+        xSemaphoreGive(modem_state.mutex);
+        status_ok = true;
+    }
     if (signal && signal_data.mutex && xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         signal_data.poll_rate = new_rate;
         xSemaphoreGive(signal_data.mutex);
         signal_ok = true;
     }
-    if ((gnss && gnss_ok) || (signal && signal_ok)) {
+    if (gnss && gnss_data.mutex && xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        gnss_data.poll_rate = new_rate;
+        xSemaphoreGive(gnss_data.mutex);
+        gnss_ok = true;
+    } 
+    if ((gnss && gnss_ok) || (signal && signal_ok) || (status && status_ok)) {
         polling_rate_changed = true;
         return true;
     }
@@ -130,6 +146,30 @@ void ResetGlobalModeState(void) {
     gnss_mode = false;
     // HTTP
     http_mode = false;
+}
+
+// Returns integer, 0 = dead, 1 = alive, 2 = registered, 3 = attached + pdp context active. (takes mutex internally)
+int GetCurrentModemState(void) {
+    int capability = 0;
+    if (modem_state.mutex && xSemaphoreTake(modem_state.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        capability = modem_state.capability;
+        xSemaphoreGive(modem_state.mutex);
+    } else {
+        printf("GetCurrentModemCapability: failed to take modem_state mutex\r\n");
+    }
+    return capability;
+}
+
+// Returns CommandState enum for current command state with mutex protection
+CommandState GetCurrentCommandState(void) {
+    CommandState state = CMD_STATE_IDLE;
+    if (cmd_buffer.mutex && xSemaphoreTake(cmd_buffer.mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        state = cmd_buffer.state;
+        xSemaphoreGive(cmd_buffer.mutex);
+    } else {
+        printf("GetCurrentCommandState: failed to take cmd_buffer mutex\r\n");
+    }
+    return state;
 }
 
 // Returns the image buffer size for a given gray mode
@@ -177,7 +217,7 @@ static void paintHomeScreen(void) {
         snprintf(buf, sizeof(buf), "Mode: AT");
     }
     else if (sms_read || sms_send) {
-        snprintf(buf, sizeof(buf), "Mode: SMS %s", sms_send ? "->" : "<-");
+        snprintf(buf, sizeof(buf), "Mode: SMS %s", sms_send ? ">" : "<");
     }
     else if (gnss_mode) {
         snprintf(buf, sizeof(buf), "Mode: GNSS");
@@ -191,9 +231,12 @@ static void paintHomeScreen(void) {
     Paint_DrawString_EN(10, 35, buf, &Font24, BLACK, WHITE);
     
     // modem status
-    if (modem_ready && modem_net) {
+    int modem_state = GetCurrentModemState();
+    if (modem_state == 3) {
+        snprintf(buf, sizeof(buf), "Modem: PDP+");
+    } else if (modem_state == 2) {
         snprintf(buf, sizeof(buf), "Modem: Online");
-    } else if (modem_ready && !modem_net) {
+    } else if (modem_state == 1) {
         snprintf(buf, sizeof(buf), "Modem: Ready");
     } else {
         snprintf(buf, sizeof(buf), "Modem: Off");
@@ -252,13 +295,12 @@ static void paintHomeScreen(void) {
         }   
         // No signal
         else {
-            if (modem_ready && modem_net) {
-                snprintf(result, sizeof(result), "NET: Looking...");
+            if (GetCurrentModemState() >= 2) {
+                snprintf(result, sizeof(result), "NET: No Signal");
             } else {
                 snprintf(result, sizeof(result), "NET: Offline");
             }
         }
-        //Paint_DrawString_EN((display_w/2) + 30 - (strlen(result) * Font16.Width), 8, result, &Font16, WHITE, BLACK);
         Paint_DrawString_EN(10, 65, result, &Font24, BLACK, WHITE);
         xSemaphoreGive(signal_data.mutex);
     } else {
@@ -281,7 +323,7 @@ static void paintHomeScreen(void) {
             // rough longitute math for calculating local time from utc for display, not accounting for daylight savings
             double lon = gnss_data.longitude;
             int local_time_offset = (int)(lon / 15); // 15 degrees of longitude per hour
-            snprintf(result, sizeof(result), "Local UTC%+d", local_time_offset);
+            snprintf(result, sizeof(result), "Local: UTC%+d", local_time_offset);
             Paint_DrawString_EN(display_w - 10 - (Font20.Width * strlen(result)), 10, result, &Font20, BLACK, WHITE);
         }
 
@@ -419,6 +461,10 @@ void Display_Event_Wake(void) {
 }
 void Display_Event_Sleep(void) {
     DisplayEvent e = { .type = DISP_EVT_SLEEP, .payload = NULL};
+    Display_PostEvent(&e, 0);
+}
+void Display_Event_ModemStateChanged(void) {
+    DisplayEvent e = { .type = DISP_EVT_MODEM_STATE_CHANGED, .payload = NULL};
     Display_PostEvent(&e, 0);
 }
 void Display_Event_ShowHome(void) {
@@ -830,16 +876,10 @@ static void Display_HandleRefreshTiming() {
         return;
     }
 
-    // Unscheduled refresh in DYNAMIC_WINDOW page to update changing content (manual full refresh by user)
-    if (current_page == PAGE_DYNAMIC_WINDOW) {
-        // GNSS DYNAMIC MODE
+    // Unscheduled refresh in DYNAMIC_WINDOW page depending on mode
+    if (current_page == PAGE_DYNAMIC_WINDOW && xSemaphoreTake(epd_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        // GNSS DYNAMIC MODE 
         if (gnss_mode) {
-            // Check if GNSS is active before refreshing
-            if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
-                if (!gnss_data.gnss_on) return;
-                xSemaphoreGive(gnss_data.mutex);
-            } 
-
             // Display as fast as the updates exist and 
             if (gnss_update_count > 0) {
                 Display_HandlePartialUpdate("GNSS");
@@ -849,10 +889,10 @@ static void Display_HandleRefreshTiming() {
 
         // HTTP DYNAMIC MODE
         if (http_mode) {
-            // Display relevant information
+            // Display incoming data after processing
         }
 
-
+        xSemaphoreGive(epd_mutex);
         return;
     }
 
@@ -885,19 +925,37 @@ static void displayTask(void *pv) {
                 case DISP_EVT_SHOW_COMMAND: setPage(PAGE_COMMAND); page_change_evt = true; break;
                 case DISP_EVT_SHOW_IDLE: setPage(PAGE_IDLE); page_change_evt = true; break;
                 case DISP_EVT_SHOW_DYNAMIC_WINDOW: setPage(PAGE_DYNAMIC_WINDOW); page_change_evt = true; break;
-                case DISP_EVT_MODEM_READY: modem_ready = true; break;
-                case DISP_EVT_MODEM_NET: modem_ready = true; modem_net = true; break;
-                case DISP_EVT_MODEM_LOST: modem_ready = false; modem_net = false; ResetGlobalModeState(); SignalData_Reset(); GnssData_Reset(); break;
+                case DISP_EVT_MODEM_STATE_CHANGED: break;
                 case DISP_EVT_SMS_RECEIVED: sms_unread_count++; break;
             }
 
-            // Only update homescreen with external modem state changes 
-            if (evt.type == DISP_EVT_MODEM_READY || evt.type == DISP_EVT_MODEM_NET || evt.type == DISP_EVT_MODEM_LOST
-                || evt.type == DISP_EVT_SMS_RECEIVED) {
+            // Only update home page on SMS_RECEIVED
+            if (evt.type == DISP_EVT_SMS_RECEIVED) {
                 if (current_page != PAGE_HOME) {
                     xSemaphoreGive(epd_mutex);
                     continue;
                 }
+            }
+
+            // Update screen based on new state)
+            if (evt.type == DISP_EVT_MODEM_STATE_CHANGED) {
+                // Switch to home page to show changes and protect complex command mode logic from modem state changes
+                if (current_page != PAGE_HOME) {
+                    setPage(PAGE_HOME);
+                    page_change_evt = true;
+                }
+                
+                switch(GetCurrentModemState()) {
+                    // Modem lost or mutex couldnt be taken to get state
+                    case 0:  ResetGlobalModeState(); ModemState_Reset(); SignalData_Reset(); GnssData_Reset(); break;
+                    // Modem alive (reset signal data)
+                    case 1:  SignalData_Reset(); break;
+                    // Modem registered
+                    case 2:  break;
+                    // Modem PDP context active (unused)
+                    case 3:  break;
+                }
+                
             }
 
             // Handle screen wake & changes
@@ -919,7 +977,7 @@ static void displayTask(void *pv) {
         }
 
         // Handles timing logic on partial updates and scheduled full screen refreshes
-        // Default: scheduled refresh every 500ms regardless of data updates
+        // Default: scheduled refresh every 500ms (epd limit) regardless of data updates
         // New mode: only refresh for a specific reason (new data, longer refresh time, keyboard input, cmd_buffer.state, etc)
         Display_HandleRefreshTiming();
 
@@ -967,8 +1025,10 @@ void Display_Init(void) {
     cmd_buffer.history_count = 0;
     cmd_buffer.input_history_count = 0;
     cmd_buffer.state = CMD_STATE_IDLE;
-    // Set signal to unkown values manually to start
-    // Mutex isnt created yet becuase this task starts before modemTask
+    // Modem state init
+    modem_state.capability = 0;
+    modem_state.poll_rate = POLL_RATE_MEDIUM;
+    // Signal data init
     signal_data.rxlev = 99;
     signal_data.ber = 99; 
     signal_data.rscp = 255;
@@ -976,7 +1036,8 @@ void Display_Init(void) {
     signal_data.rsrq = 255;
     signal_data.rsrp = 255;
     signal_data.poll_rate = POLL_RATE_MEDIUM;
-    // Same with GNSS
+    // GNSS data init
+    gnss_data.gnss_on = false;
     gnss_data.latitude = 0.0;
     gnss_data.longitude = 0.0;
     gnss_data.altitude[0] = '\0';

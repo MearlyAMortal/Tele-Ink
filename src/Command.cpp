@@ -9,6 +9,8 @@
 static char sms_number[32] = {0};
 static ModemHttpResponse http_response = {0};
 
+// Keep response less than or equal to 30 characters to fit in output buffer and leave room for null terminator
+
 // Quick way to exit the if else tree if condition is not met
 // Takes a string for the output command (usually an error)
 static void Command_SetDone(const char* out){
@@ -127,7 +129,7 @@ static void SetSmsNumbers(char* id_str, const int* ids, int num) {
 // Wizard for handling sending sms messages when in sms_send mode
 static void SMS_SEND_Wizard(char *in) {
     if (strcmp(in, "help") == 0) {
-        Command_SetDone("SMS S: <message>, /exit");
+        Command_SetDone("SMS S: <message>");
         return;
     }
     if (strcmp(in, "/exit") == 0) {
@@ -148,7 +150,7 @@ static void SMS_SEND_Wizard(char *in) {
 // Wizard for handling reading unread/all messages and responding/deleting when in sms_read mode
 static void SMS_READ_Wizard(char *in) {
     if (strcmp(in, "help") == 0) {
-        Command_SetDone("SMS R: id, /s, /da, /d id, /exit");
+        Command_SetDone("SMS R: id, /s, /d id, /da");
         return;
     }
     // No messages to read left from unread and not responding
@@ -215,6 +217,10 @@ static void SMS_READ_Wizard(char *in) {
             }
             return;
         }
+        else {
+            Command_SetDone("Error: Invalid delete command");
+            return;
+        }
     }
     // Reading message by idx
     int idr = ValidateID(in);
@@ -262,7 +268,7 @@ static void SMS_READ_Wizard(char *in) {
 
         // Finding header
         if (strstr(tmp, cmd) == NULL) {
-            Command_SetDone("Error: Failed to parse message");
+            Command_SetDone("Error: Cant parse message");
             return;
         }
 
@@ -319,8 +325,8 @@ static void AT_Wizard(char *in) {
 }
 
 // Takes gnss and or signal bool to change polling rate depending on a user speicified integer and then calls the display function to update global returns true if display function returns true;
-static bool Command_SetPollingRate(bool gnss, bool signal, char *in) {
-    if (!gnss && !signal) return false;
+static bool Command_SetPollingRate(bool status, bool signal, bool gnss, char *in) {
+    if (!status && !signal && !gnss) return false;
     PollRate new_rate = POLL_RATE_MEDIUM;
     if (strcmp(in, "1") == 0) {
         new_rate = POLL_RATE_LOW;
@@ -332,7 +338,7 @@ static bool Command_SetPollingRate(bool gnss, bool signal, char *in) {
         Command_SetDone("Error: Invalid (1,2,3)");
         return false;
     }
-    return ChangePollingRate(gnss, signal, new_rate);
+    return ChangePollingRate(status, signal, gnss, new_rate);
 }
 
 // Wizard for handling gnss mode inputs.
@@ -396,7 +402,7 @@ static void GNSS_Wizard(char *in) {
             Command_SetDone("GNSS turned off");
         } 
         else {
-            Command_SetDone("Error: Failed to turn off GNSS");
+            Command_SetDone("Error: Cant turn off GNSS");
         }
         return;
     }
@@ -418,7 +424,7 @@ static void GNSS_Wizard(char *in) {
         return;
     } 
     else if (strncmp(in, "poll ", 5) == 0) {
-        if (!Command_SetPollingRate(true, false, in + 5)) {
+        if (!Command_SetPollingRate(false, false, true, in + 5)) {
             Command_SetDone("Error: GNSS polling rate fail");
         } else {
             Command_SetDone("GNSS polling rate updated");
@@ -433,16 +439,27 @@ static void GNSS_Wizard(char *in) {
 
 // Wizard for handling http mode inputs. Only get method implemented for now
 static void HTTP_Wizard(char *in) {
-    if (strcmp(in, "/exit") == 0) {
-        Command_SetDone("Exiting HTTP mode");
-        http_mode = false;
-        return;
-    }
     if (strncmp(in, "help", 4) == 0) {
         Command_SetDone("HTTP: get/post/list/test/lrp");
         return;
     }
-    else if (strncmp(in, "get ", 4) == 0) {
+    else if (strcmp(in, "/exit") == 0) {
+        Command_SetDone("Exiting HTTP mode");
+        http_mode = false;
+        return;
+    }
+    // Check Registration and PDP context is active before sending http request
+    if (GetCurrentModemState() < 2) {
+        Command_SetDone("Error: Modem not registered");
+        return;
+    }
+    char resp[256] = {0};
+    if (!Modem_SendAT("AT+CGACT?", "+CGACT: 1,1", resp, sizeof(resp), 5000)) {
+        Command_SetDone("Error: PDP context not active");
+        return;
+    }
+    // Continue with http request if registered and pdp active
+    if (strncmp(in, "get ", 4) == 0) {
         ModemHttpRequest req;
         req.method = MODEM_HTTP_GET;
         req.url = in + 4;
@@ -500,24 +517,6 @@ static void HTTP_Wizard(char *in) {
 }
 
 
-    
-// Helper to return true if gnss state is showing "off" or sets command done with an error and returns false
-static bool GNSSOff() {
-    if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        if (gnss_data.gnss_on) {
-            Command_SetDone("Error: Turn GNSS off first");
-            xSemaphoreGive(gnss_data.mutex);
-            return false;
-        }
-        xSemaphoreGive(gnss_data.mutex);
-    } else {
-        Command_SetDone("Error: Cant take GNSS mutex");
-        return false;
-    }
-    return true;
-}
-
-
 
 // Interprets keyboard input and responds with an error or display/modem/etc event.
 // Possibly the most ugly if else switch statement in existence (but it works)
@@ -535,31 +534,23 @@ void Command_Handle(void){
         return;
     }
 
-    // Trim input for easier parsing but also safety
     TrimRight(in);
 
-    /* YOUR A WIZARD 
-     * Handles non base case $ command modes like GNSS, SMS, etc
-     * And check multi-line command mode first before handling base $
-     * EX: my prompt for a ssid and password in seperate calls for one single command action 
-    */
+    // WIZARDRY TIME
+    //Handles non base case $ command modes like GNSS, SMS, etc
 
-    // Send sms once collected number and message
     if (sms_send) {
         SMS_SEND_Wizard(in);
         return;
     } 
-    // Read messages based on index (ru consumes messages, can also delete by index or all)
     else if (sms_read) {
         SMS_READ_Wizard(in);
         return;
     }
-    // AT single line mode wizard
     else if (at_mode) {
         AT_Wizard(in);
         return;
     }
-    // GNSS wizard
     else if (gnss_mode) {
         GNSS_Wizard(in);
         return;
@@ -603,18 +594,19 @@ void Command_Handle(void){
             // Might need to change PWK off of strapping GPIO4 so boot doesnt pull PWK low
             ESP.restart();
         } else {
-            Command_SetDone("Error: Unknown ESP command");
+            Command_SetDone("Error: /esp help for commands");
             return;
         }
     }
     // Modem external control
     else if (strncmp(in, "/sim", 4) == 0) {
+        char tmp[256] = {0};
         if (strcmp(in, "/sim help") == 0) {
-            Command_SetDone("SIM: on/off/rst/net/info/poll");
+            Command_SetDone("SIM: on/off/rst/net/info/poll/offline/online");
             return;
         }
         else if (strcmp(in, "/sim on") == 0) {  
-            if (!modem_ready) {
+            if (GetCurrentModemState() == 0) {
                 Modem_TogglePWK(1200);
                 Command_SetDone("Toggled pwk for modem ON");
             } else {
@@ -622,13 +614,10 @@ void Command_Handle(void){
             }
             return;
         } 
-        else if (strcmp(in, "/sim help") == 0) {
-            Command_SetDone("SIM CMDS: on/off/rst/net/info/poll");
-            return;
-        }
         else if (strcmp(in, "/sim off") == 0) {  
-            if (modem_ready) {
+            if (GetCurrentModemState() != 0) {
                 Modem_TogglePWK(3000);
+                ModemState_Reset();
                 SignalData_Reset();
                 GnssData_Reset();
                 Command_SetDone("Toggled pwk for modem OFF");
@@ -637,7 +626,8 @@ void Command_Handle(void){
             }
             return;
         } else if (strcmp(in, "/sim rst") == 0) {  
-            if (modem_ready) {
+            if (GetCurrentModemState() != 0) {
+                ModemState_Reset();
                 SignalData_Reset();
                 GnssData_Reset();
                 Modem_Restart();
@@ -648,8 +638,7 @@ void Command_Handle(void){
             return;
         } 
         else if (strcmp(in, "/sim net") == 0) {
-            if (modem_ready) {
-                char tmp[256] = {0};
+            if (GetCurrentModemState() != 0) {
                 Modem_SendAT("AT+COPS?", NULL, tmp, sizeof(tmp), 5000);
                 ReplaceControlChars(tmp);
                 Command_SetDone(tmp);
@@ -659,8 +648,7 @@ void Command_Handle(void){
             return;
         } 
         else if (strcmp(in, "/sim info") == 0) {
-            if (modem_ready) {
-                char tmp[256] = {0};
+            if (GetCurrentModemState() != 0) {
                 Modem_SendAT("AT+CGMM", NULL, tmp, sizeof(tmp), 5000);
                 ReplaceControlChars(tmp);
                 Command_SetDone(tmp);
@@ -669,8 +657,26 @@ void Command_Handle(void){
             }
             return;
         }
+        else if (strcmp(in, "/sim offline") == 0) {
+            if (GetCurrentModemState() != 0) {
+                Modem_SendAT("AT+COPS=2", NULL, tmp, sizeof(tmp), 5000);
+                Command_SetDone("Set modem to offline mode");
+            } else {
+                Command_SetDone("Error: Modem not ready");
+            }
+            return;
+        }
+        else if (strcmp(in, "/sim online") == 0) {
+            if (GetCurrentModemState() != 0) {
+                Modem_SendAT("AT+COPS=0", NULL, tmp, sizeof(tmp), 5000);
+                Command_SetDone("Set modem to automatic");
+            } else {
+                Command_SetDone("Error: Modem not ready");
+            }
+            return;
+        }
         else if (strncmp(in, "/sim poll ", 10) == 0) {
-            if (!Command_SetPollingRate(false, true, in + 10)) {
+            if (!Command_SetPollingRate(true, true, false, in + 10)) { // sets both status and cesq since sim encompanses both (for now)
                 Command_SetDone("Error: Signal poll fail");
             } else {
                 Command_SetDone("Signal polling rate updated");
@@ -688,12 +694,10 @@ void Command_Handle(void){
             Command_SetDone("SMS: /sms (ra/ru/s) <number>");
             return;
         }
-        if (!modem_ready){
-            Command_SetDone("Error: Modem is not ready");
+        if (GetCurrentModemState() < 2) {
+            Command_SetDone("Error: No Registration");
             return;
         }
-        // Make sure GNSS is off first
-        if (!GNSSOff()) return;
         // Enable text mode
         char tmp[512] = {0};
         if (!Modem_SetCheckMode(1)){
@@ -701,7 +705,7 @@ void Command_Handle(void){
             return;
         } 
         tmp[0] = '\0';
-        int m = 0; //total msgs
+        int m = 0;
         char id_str[32] = {0};
         int ids[10];
         // Reading recivied messages
@@ -786,12 +790,10 @@ void Command_Handle(void){
     // Modem task should dequeue and send command, then return response
     // Multiline AT commands from here not supported for now
     else if (strncmp(in, "/at", 3) == 0) {
-        if (!modem_ready) {
+        if (GetCurrentModemState() == 0) {
             Command_SetDone("Error: Modem is not ready");
             return;
         }
-         // Make sure GNSS is off first
-        if (!GNSSOff()) return;
         
         // QUICK COMMAND
         if (strlen(in) > 4 && in[3] == ' ') {
@@ -814,7 +816,7 @@ void Command_Handle(void){
     }
     // GNSS wizard entry or quick access
     else if (strcmp(in, "/gnss") == 0) {
-        if (!modem_ready) {
+        if (GetCurrentModemState() == 0) {
             Command_SetDone("Error: Modem is not ready");
             return;
         }
@@ -825,12 +827,10 @@ void Command_Handle(void){
     }
     // HTTP API wizard entry 
     else if (strcmp(in, "/http") == 0) {
-        if (!modem_ready) {
-            Command_SetDone("Error: Modem is not ready");
+        if (GetCurrentModemState() == 0) {
+            Command_SetDone("Error: Modem not ready");
             return;
         }
-        // Make sure GNSS is off first
-        if (!GNSSOff()) return;
         http_mode = true;
         Command_SetDone("HTTP mode: get/post url body");
         return;
@@ -843,7 +843,6 @@ void Command_Handle(void){
     }
 
     // Error was default, fallback if didnt exit early using Command_SetDone
-    // Set cmd.buffer output and state
     Command_SetDone(out);
     return;
 }   

@@ -9,12 +9,22 @@
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 
-#define POLL_MS 80
+#define KEY_SCAN_BASE_POLL_MS 80
+#define KEY_SCAN_BURST_POLL_MS 20
+#define KEY_SCAN_BURST_WINDOW_MS 10000
+#define KEY_RECONNECT_POLL_MS 500
+#define KEY_QUEUE_LEN 32
+#define KEY_SCAN_DRAIN_READS 3
+
+#define KEY_I2C_RETRY_COUNT 2
+#define KEY_I2C_RETRY_DELAY_US 500
 
 static TwoWire *ikey_i2c = nullptr;
 static uint8_t ikey_addr = 0x5F;
 static TaskHandle_t key_task = NULL;
+static TaskHandle_t key_scan_task = NULL;
 static SemaphoreHandle_t i2c_mutex = NULL;
+static QueueHandle_t key_queue = NULL;
 static volatile bool key_connected = false;
 static int history_peek_idx = -1;
 
@@ -55,24 +65,32 @@ static void handle_special_key(uint8_t &kc) {
     }
 }
 
-// Reads a single byte from the keyboard over I2C, returns false if no key or error
-// Cast the return as an int in case I2C returns negative for whatever reason
+// Reads a single byte from the keyboard over I2C with retry logic, returns false if no key or error
 static bool i2c_read_key(uint8_t &out) {
     if (!ikey_i2c || !i2c_mutex) return false;
     if (xSemaphoreTake(i2c_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        ikey_i2c->beginTransmission(ikey_addr);
-        // que one byte into tx buff from register ptr
-        ikey_i2c->write(0x00);
-        // End write phase but dont stop, and take tx wire error code
-        uint8_t tx = ikey_i2c->endTransmission(false);
-        uint8_t req = ikey_i2c->requestFrom((int)ikey_addr, 1);
-        bool ok = (tx == 0) && (req == 1);
-        if (ok) out = ikey_i2c->read();
-
-        xSemaphoreGive(i2c_mutex);
-        if (ok && out != 0x00){
-            return true;
+        for (int attempt = 0; attempt < KEY_I2C_RETRY_COUNT; attempt++) {
+            ikey_i2c->beginTransmission(ikey_addr);
+            ikey_i2c->write(0x00);
+            uint8_t tx = ikey_i2c->endTransmission(false);
+            
+            // Delay after endTransmission to let kb prepare data
+            delayMicroseconds(KEY_I2C_RETRY_DELAY_US);
+            
+            uint8_t req = ikey_i2c->requestFrom((int)ikey_addr, 1);
+            if ((tx == 0) && (req == 1)) {
+                out = ikey_i2c->read();
+                xSemaphoreGive(i2c_mutex);
+                if (out != 0x00) {
+                    return true;
+                }
+                return false;
+            }
+            if (attempt < KEY_I2C_RETRY_COUNT - 1) {
+                delayMicroseconds(KEY_I2C_RETRY_DELAY_US * 2);
+            }
         }
+        xSemaphoreGive(i2c_mutex);
     }
     return false;
 }
@@ -93,6 +111,45 @@ static bool Keyboard_IsConnected(void) {
 }
 
 // No debounce needed, just read and handle keypresses from I2C 0x5F
+static void keyScanTask(void *pv) {
+    (void)pv;
+    uint8_t keycode = 0;
+
+    TickType_t last_wake = xTaskGetTickCount();
+    TickType_t burst_until_tick = 0;
+
+    for (;;) {
+        if (!key_connected) {
+            key_connected = Keyboard_IsConnected();
+            vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(KEY_RECONNECT_POLL_MS));
+            continue;
+        }
+
+        keycode = 0;
+        if (i2c_read_key(keycode)) {
+            burst_until_tick = xTaskGetTickCount() + pdMS_TO_TICKS(KEY_SCAN_BURST_WINDOW_MS);
+
+            (void)xQueueSend(key_queue, &keycode, 0);
+
+            // Drain a few immediate reads to catch clustered key events
+            for (int i = 0; i < KEY_SCAN_DRAIN_READS; i++) {
+                uint8_t next_key = 0;
+                if (!i2c_read_key(next_key)) {
+                    break;
+                }
+                (void)xQueueSend(key_queue, &next_key, 0);
+            }
+        }
+
+        TickType_t poll_ticks = pdMS_TO_TICKS(KEY_SCAN_BASE_POLL_MS);
+        if (xTaskGetTickCount() < burst_until_tick) {
+            poll_ticks = pdMS_TO_TICKS(KEY_SCAN_BURST_POLL_MS);
+        }
+        vTaskDelayUntil(&last_wake, poll_ticks);
+    }
+}
+
+// Consume keycodes from scanner queue and apply display/command behavior.
 static void keyTask(void *pv) {
     (void)pv;
     uint8_t keycode = 0;
@@ -101,23 +158,18 @@ static void keyTask(void *pv) {
     static size_t line_pos = 0;
 
     for (;;) {
-        if (!key_connected) {
-            DEV_Delay_ms(POLL_MS*100);
-            key_connected = Keyboard_IsConnected();
+        if (!key_queue) {
+            DEV_Delay_ms(KEY_RECONNECT_POLL_MS);
             continue;
         }
 
-        // Read Keyboard data, false if 0x00 (no key) IDLE
-        keycode = 0;
-        if (!i2c_read_key(keycode) ) {
-            DEV_Delay_ms(POLL_MS);
+        // Wait for next key event from scan task.
+        if (xQueueReceive(key_queue, &keycode, pdMS_TO_TICKS(100)) != pdTRUE) {
             continue;
         }
 
         // Key press detected!
         SetLastActivityTick(); // Reset idle timer for display on any key press
-
-        printf("Keycode: 0x%02X\r\n", keycode);
 
         // Handle special key if mapped (exit sequential and return to base handling)
         if (keycode >= 0x80 && keycode <= 0xAF) {
@@ -301,12 +353,14 @@ static void keyTask(void *pv) {
         } else if (current_page == PAGE_DYNAMIC_WINDOW) {
             // If in dynamic window mode this gives control to user if programmed to interact with anything that is displayed
         }
-        DEV_Delay_ms(POLL_MS);
     }
 }
 
-// Start keyboard task with very high priority if key_task isnt running
-static void Keyboard_StartTask(void){
+// Start keyboard scanner and consumer tasks if they are not running.
+static void Keyboard_StartTasks(void){
+    if (!key_scan_task) {
+        xTaskCreatePinnedToCore(keyScanTask, "key_scan", 4096, NULL, 4, &key_scan_task, 0);
+    }
     if (!key_task) {
         xTaskCreatePinnedToCore(keyTask, "key", 4096, NULL, 3, &key_task, 0);
     }
@@ -318,6 +372,12 @@ bool Keyboard_Init(TwoWire *i2cInstance, uint8_t i2cAddress){
     ikey_i2c = i2cInstance;
     ikey_addr = i2cAddress;
     if (!i2c_mutex) i2c_mutex = xSemaphoreCreateMutex();
+    if (!key_queue) key_queue = xQueueCreate(KEY_QUEUE_LEN, sizeof(uint8_t));
+
+    if (!i2c_mutex || !key_queue) {
+        printf("Error: Keyboard init failed (mutex/queue).\r\n");
+        return false;
+    }
 
     if (Keyboard_IsConnected()) {
         key_connected = true;
@@ -325,7 +385,7 @@ bool Keyboard_Init(TwoWire *i2cInstance, uint8_t i2cAddress){
         printf("Error: Keyboard could not connect on init! Starting task anyway.\r\n");
     }
 
-    Keyboard_StartTask();
+    Keyboard_StartTasks();
     return true;
 }
 

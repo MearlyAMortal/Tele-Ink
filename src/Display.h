@@ -13,7 +13,7 @@
 ******************************************************************************/
 #ifndef DISPLAY_H
 #define DISPLAY_H
-#include "GUI_Paint.h" //for paint_time
+#include "GUI_Paint.h"
 #include "DEV_Config.h"
 
 // Canvas
@@ -47,11 +47,8 @@ typedef enum {
     DISP_EVT_SHOW_COMMAND,
     DISP_EVT_SHOW_IDLE,
     DISP_EVT_SHOW_DYNAMIC_WINDOW,
-    DISP_EVT_MODEM_READY,
-    DISP_EVT_MODEM_NET,
-    DISP_EVT_MODEM_LOST,
+    DISP_EVT_MODEM_STATE_CHANGED,
     DISP_EVT_SMS_RECEIVED,
-    DISP_EVT_CUSTOM_MSG,
 } DisplayEventType;
 
 typedef struct {
@@ -64,7 +61,7 @@ typedef struct {
 #define CMD_BUFFER_SIZE 256
 #define CMD_HISTORY_LINES 16
 #define CMD_INPUT_HISTORY_LINES 16
-// IDLE(display)(init) => TYPING(keyboard) -> PROCESSING(command) -> DONE(command) -> IDLE(keyboard) -> TYPING(keyboard)
+// IDLE(display)(init) => TYPING(keyboard) -> PROCESSING(command calling outside) -> DONE(command) -> IDLE(keyboard) -> TYPING(keyboard)
 typedef enum {
     CMD_STATE_IDLE = 0,
     CMD_STATE_TYPING,
@@ -88,9 +85,7 @@ typedef struct {
 extern CommandBuffer cmd_buffer;
 
 // modem
-extern bool modem_ready; // Modem is ready to recive data
-extern bool modem_net; // Modem has proved that it can respond and network status home or roaming (not literally on the network, this naming convention can be confusing)
-extern uint8_t modem_mode;
+extern uint8_t modem_mode; // add to modem state?
 extern int sms_count; 
 extern int sms_unread_count; // Actual new incoming message count via URC
 extern int sms_ids[10];
@@ -103,7 +98,6 @@ extern bool gnss_mode;
 extern int gnss_update_count;
 extern bool http_mode;
 
-
 // Selectable/Scaleable/Programmable poll rate for each type of data collection. Changed in command.cpp /pr x 1=low, 2=med, 3=high from each respective polling mode wizard
 typedef enum {
     POLL_RATE_LOW = 1,
@@ -113,6 +107,14 @@ typedef enum {
 
 extern bool polling_rate_changed;
 
+// Modem state data holding data collected from background modem task
+typedef struct {
+    int capability; // 0-3 for (dead, alive, registered, pdp)
+    PollRate poll_rate;
+    SemaphoreHandle_t mutex;
+} ModemState;
+extern ModemState modem_state;
+ 
 // GNSS
 typedef struct {
     bool gnss_on;
@@ -145,17 +147,21 @@ extern SignalData signal_data;
 bool Display_PostEvent(const DisplayEvent *evt, TickType_t ticksToWait);
 void Display_Event_Wake(void);
 void Display_Event_Sleep(void);
+void Display_Event_ModemStateChanged(void);
 void Display_Event_ShowHome(void);
 void Display_Event_ShowIdle(void);
 void Display_Event_ShowCommand(void);
 void Display_Event_ShowDynamicWindow(void);
-// Update internal display ds
+// Public functions for display to call or from other files
 void Display_ClearCommandHistory(void);
 void SetLastActivityTick(void);
+void ModemState_Reset(void);
 void SignalData_Reset(void);
 void GnssData_Reset(void);
 void ResetGlobalModeState(void);
-bool ChangePollingRate(bool gnss_data, bool signal_data, PollRate new_rate);
+bool ChangePollingRate(bool status, bool signal, bool gnss, PollRate new_rate);
+int GetCurrentModemState(void);
+CommandState GetCurrentCommandState(void);
 
 
 

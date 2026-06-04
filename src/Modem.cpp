@@ -48,7 +48,7 @@ void Modem_TogglePWK(uint32_t duration_ms) {
 
 // Public function for easy restarting the modem automatically with the correct timing (long press then short press)
 void Modem_Restart(void) {
-    if (!modem_ready) {
+    if (GetCurrentModemState() == 0) {
         printf("Modem_Restart: Modem not ready, cannot restart.\r\n");
         return;
     }
@@ -62,7 +62,7 @@ void Modem_Restart(void) {
 
 // Internal function to write raw data to modem serial with mutex and timeout, returns true if all bytes written, false if error or timeout
 static bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeout_ms) {
-    if (!modemSerial || !modem_ready) return false;
+    if (!modemSerial || GetCurrentModemState() == 0) return false;
     if (!data || len == 0) return true;
     if (!modem_mutex) return false;
 
@@ -75,7 +75,7 @@ static bool Modem_WriteRaw(const uint8_t *data, size_t len, uint32_t timeout_ms)
     return false;
 }
 
-// queue
+// Internal function to write string to modem serial with mutex and timeout, returns true if all bytes written, false if error or timeout
 static ModemCmd* Modem_QueueWaitOnly(uint32_t timeout_ms) {
     ModemCmd *w = (ModemCmd*)malloc(sizeof(ModemCmd));
     if (!w) return NULL;
@@ -381,107 +381,6 @@ static void HaltUntilEmptyProcessor() {
     }
 }
 
-// Returns true if state changed. update internal based on phyisical state (mostly helpful for communication between displayTask)
-bool Modem_CheckStatus(void) {
-    // modemTask must have been deinitialized or serial = nullptr or something catostrophic happened if modemSerial is null at this point
-    if (!modemSerial && modem_serial_begun) {
-        modem_serial_begun = false;
-        DisplayEvent e = { .type = DISP_EVT_MODEM_LOST, .payload = NULL};
-        Display_PostEvent(&e, 0);
-        DEV_Delay_ms(100);
-        return true;
-    }
-    // Begin serial if lost after initilizing it in modemTask
-    if (!modem_serial_begun) {
-        modemSerial->begin(115200, SERIAL_8N1, modem_rx_pin, modem_tx_pin);
-        modemSerial->flush();
-        while (modemSerial->available()) modemSerial->read();
-        DEV_Delay_ms(100);
-        modem_serial_begun = true;
-    }
-    // Check for timeouts on calls
-    unsigned long start;
-    
-    // Check network first manually or queue depeding if modem_ready
-    if (!modem_ready) {
-        char resp[64] = {0};
-        int idx = 0;
-        start = millis();
-        if (modem_mutex && xSemaphoreTake(modem_mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
-            modemSerial->flush();
-            modemSerial->print("AT+CREG?\r\n");
-            while (millis() - start < 1000 && idx < sizeof(resp) - 1) {
-                if (modemSerial->available()) {
-                    char c = modemSerial->read();
-                    resp[idx++] = c;
-                    resp[idx] = '\0';
-                    if (strstr(resp, "0,5") || strstr(resp, "0,1")) {
-                        DisplayEvent e = {.type = DISP_EVT_MODEM_NET, .payload = NULL};
-                        Display_PostEvent(&e, 0);
-                        DEV_Delay_ms(100);
-                        xSemaphoreGive(modem_mutex);
-                        return true;
-                    }
-                }
-            }
-            // No registration but check AT
-            resp[0] = '\0';
-            idx = 0;
-            start = millis();
-            modemSerial->flush();
-            modemSerial->print("AT\r\n");
-            // Read response with timeout
-            while (millis() - start < 1000 && idx < sizeof(resp) - 1) {
-                if (modemSerial->available()) {
-                    char c = modemSerial->read();
-                    resp[idx++] = c;
-                    resp[idx] = '\0';
-                    if (strstr(resp, "OK")) {
-                        DisplayEvent e = {.type = DISP_EVT_MODEM_READY, .payload = NULL};
-                        Display_PostEvent(&e, 0);
-                        DEV_Delay_ms(100);
-                        xSemaphoreGive(modem_mutex);
-                        return true;                        
-                    }
-                }
-            }
-            modemSerial->flush();
-            xSemaphoreGive(modem_mutex);
-        } else {
-            printf("Modem_CheckStatus: failed to take modem_mutex for status check (timeout)\r\n");
-            DEV_Delay_ms(250);
-            return false;
-        }
-        // Still modem not ready
-        return false;
-    }
-    // Modem is allready ready at ths point
-    if (!modem_net){
-        char resp[64] = {0};
-        Modem_SendAT("AT+CREG?", NULL, resp, sizeof(resp), 2000);
-        if (strstr(resp, "0,5") || strstr(resp, "0,1")) {
-            DisplayEvent e = {.type = DISP_EVT_MODEM_NET, .payload = NULL};
-            Display_PostEvent(&e, 0);
-            DEV_Delay_ms(100);
-            return true;
-        }
-    }
-    // Assume registration is fine check AT periodically to update internal state if modem is lost
-    if (modem_ready && modem_net) {
-        char resp[32] = {0};
-        Modem_SendAT("AT", NULL, resp, sizeof(resp), 1000);
-        if (strstr(resp, "OK") == NULL) {
-            DisplayEvent e = { .type = DISP_EVT_MODEM_LOST, .payload = NULL};
-            Display_PostEvent(&e, 0);
-            DEV_Delay_ms(100);
-            return true;
-        }
-    }
-
-    // No change
-    return false;
-}
-
 // Converts NMEA-style latitude/longitude to decimal degrees
 static double nmea_to_decimal(const char *val, char dir) {
     double deg, min;
@@ -572,7 +471,7 @@ void GNSS_ToOneLinerAndUpdate(const char *input, char *output, size_t out_size) 
     // Requires user to repaint if they want current data rather than spamming fullscreen updates 
 }
 
-// Parses +CESQ response, updates global signal_data with mutex after reseting values in case of fallback, returns true if parsed and updated successfully, false if error
+// Parses CESQ response for signal quality metrics, updates global signal_data with mutex, returns true if successfully parsed and updated, false if error
 static bool CESQ_ParseAndUpdate(const char *input) {
     uint8_t rxl, ber, rscp, ecno, rsrq, rsrp;
     if (sscanf(input, "%hhu,%hhu,%hhu,%hhu,%hhu,%hhu", &rxl, &ber, &rscp ,&ecno, &rsrq, &rsrp) != 6) {
@@ -594,16 +493,26 @@ static bool CESQ_ParseAndUpdate(const char *input) {
     }
 }
 
-
+// Gets poll rates from global state with mutex, returns default values if error. 
+// Status and CESQ poll rates are calculated based on signal_data.poll_rate for dynamic adjustment based on signal strength
+// GNSS poll rate range is larger due to differing needs from user
 static void Background_GetPollRates(int &status_ms, int &cesq_ms, int &gnss_ms) {
     if (!status_ms || !cesq_ms || !gnss_ms) return;
+    // Status
+    if (xSemaphoreTake(modem_state.mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        status_ms = 24000 / int(modem_state.poll_rate);
+        xSemaphoreGive(modem_state.mutex);
+    } else {
+        printf("Background_GetPollRates: failed to take modem_state mutex\r\n");
+    }
+    // CESQ
     if (xSemaphoreTake(signal_data.mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
-        status_ms = 30000 / int(signal_data.poll_rate);
         cesq_ms = 180000 / int(signal_data.poll_rate);
         xSemaphoreGive(signal_data.mutex);
     } else {
         printf("Background_GetPollRates: failed to take background_poll_rate_mutex\r\n");
     }
+    // GNSS
     if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
         if (gnss_data.poll_rate == POLL_RATE_HIGH) {
             gnss_ms = 3000;
@@ -618,12 +527,125 @@ static void Background_GetPollRates(int &status_ms, int &cesq_ms, int &gnss_ms) 
     }
 }
 
+// Internal function to update modem state with mutex.
+static void Modem_UpdateModemState(int new_state) {
+    if (xSemaphoreTake(modem_state.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        modem_state.capability = new_state;
+        xSemaphoreGive(modem_state.mutex);
+    } else {
+        printf("Modem_UpdateModemState: failed to take modem_state mutex\r\n");
+    }
+}
 
 
+// Sets up serial connection on boot/disconnect, sets modem state to ready manually and then is used to check registration after checking connection. returns true if state changed
+bool Modem_CheckStatus(void) {
+    // HANDLE MODEM UART SERIAL ON LOST OR BOOT
+    // modemTask must have been deinitialized or serial = nullptr or something catostrophic happened if modemSerial is null at this point
+    if (!modemSerial && modem_serial_begun) {
+        modem_serial_begun = false;
+        Modem_UpdateModemState(0);
+        Display_Event_ModemStateChanged();
+        DEV_Delay_ms(100);
+        return true;
+    }
+    // Begin serial if lost after initilizing it in modemTask
+    if (!modem_serial_begun) {
+        modemSerial->begin(115200, SERIAL_8N1, modem_rx_pin, modem_tx_pin);
+        modemSerial->flush();
+        while (modemSerial->available()) modemSerial->read();
+        DEV_Delay_ms(100);
+        modem_serial_begun = true;
+    }
+
+    // Start time and response buffer
+    unsigned long start;
+    char resp[64] = {0};
+
+    // Regsistration fail count
+    static int reg_fail_count = 0;
+    
+    // Get current state
+    int current_state = GetCurrentModemState();
+
+    // Modem is not ready so send AT manually becuase modem_task cannot consume cmds if the modem isnt ready
+    if (current_state == 0) {
+        int idx = 0;
+        if (modem_mutex && xSemaphoreTake(modem_mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+            modemSerial->print("AT\r\n");
+            start = millis();
+            // Read response with timeout
+            while (millis() - start < 1000 && idx < sizeof(resp) - 1) {
+                if (modemSerial->available()) {
+                    char c = modemSerial->read();
+                    resp[idx++] = c;
+                    resp[idx] = '\0';
+                    if (strstr(resp, "OK")) {
+                        Modem_UpdateModemState(1);
+                        Display_Event_ModemStateChanged();
+                        xSemaphoreGive(modem_mutex);
+                        return true;                        
+                    }
+                }
+            }
+            xSemaphoreGive(modem_mutex);
+        } else {
+            printf("Modem_CheckStatus: failed to take modem_mutex for status check (timeout)\r\n");
+            DEV_Delay_ms(250);
+            return false;
+        }
+        // Still modem not ready
+        return false;
+    }
+
+    memset(resp, 0, sizeof(resp));
+
+    // Modem state is at least 1
+    // Check registration for EPS 4G LTE and fallback PS 2g/3g check. If both fail but got a response the modem is only ready
+    if (Modem_SendAT("AT+CEREG?", NULL, resp, sizeof(resp), 5000)) {
+        if (strstr(resp, "0,5") || strstr(resp, "0,1")) {
+            reg_fail_count = 0;
+            if (current_state >= 2) return false;
+            Modem_UpdateModemState(2);
+            Display_Event_ModemStateChanged();
+            return true;
+        } else if (Modem_SendAT("AT+CGREG?", NULL, resp, sizeof(resp), 5000)) {
+            if (strstr(resp, "0,5") || strstr(resp, "0,1")) {
+                reg_fail_count = 0;
+                if (current_state >= 2) return false;
+                Modem_UpdateModemState(2);
+                Display_Event_ModemStateChanged();
+                return true;
+            } else {
+                reg_fail_count++;
+                if (reg_fail_count >= 2) {
+                    reg_fail_count = 0;
+                    if (current_state != 1) {
+                        Modem_UpdateModemState(1);
+                        Display_Event_ModemStateChanged();
+                        return true;
+                    }
+                }
+                // Skip the first fail
+                return false;
+            }
+        }
+    } 
+    // Quickly check "AT" without collection response since it will return false if error
+    else {
+        if (!Modem_SendAT("AT", NULL, resp, sizeof(resp), 2000)) {
+            Modem_UpdateModemState(0);
+            Display_Event_ModemStateChanged();
+            return true;
+        }
+    } 
+
+    // Still only ready
+    return false;
+}
 
 // Handles modem status checking, +CESQ polling, and GNSS polling. URC is still handled by main task (not time sensitive)
 // Use task tick count for correct delay times on each specifc background job
-// Only blocking when modem_ready is false so re ready the modem for the main task
 static void ModemBackgroundTask(void *pv) {
     (void)pv;
     char resp[128] = {0};
@@ -632,16 +654,17 @@ static void ModemBackgroundTask(void *pv) {
     TickType_t last_status_check = xTaskGetTickCount();
     TickType_t last_cesq_call = xTaskGetTickCount();
     TickType_t last_gnss_call = xTaskGetTickCount();
+
     TickType_t now = 0;
 
-    int poll_rate_status_ms = 15000;
+    int poll_rate_status_ms = 12000;
     int poll_rate_cesq_ms = 90000;
     int poll_rate_gnss_ms = 18000;
 
     for (;;) {
         now = xTaskGetTickCount();
 
-        // Update poll rates if they have changed in the display task
+        // Update poll rates if they have changed in the display task function called from command
         if (polling_rate_changed) {
             DEV_Delay_ms(500); // Give display task time to update state before reading it
             Background_GetPollRates(poll_rate_status_ms, poll_rate_cesq_ms, poll_rate_gnss_ms);
@@ -650,8 +673,7 @@ static void ModemBackgroundTask(void *pv) {
         }
 
 
-        // Status handling if enough time has passed since last check (15s)
-        // Status check can be high blocking for modemTask but want responsive system diagnosis
+        // Check if modem is still ready every poll_rate_status_ms and update state if changed.
         if (now - last_status_check >= pdMS_TO_TICKS(poll_rate_status_ms)) {
             if (Modem_CheckStatus()) {
                 printf("Modem status changed!\r\n");
@@ -661,11 +683,39 @@ static void ModemBackgroundTask(void *pv) {
             } 
             last_status_check = now;
         }
-        // No need to proceed, the modem is not ready for anything. Wait a full second before checking again (could be intentionally not ready)
-        if (!modem_ready || !modem_net) {
-            DEV_Delay_ms(1000);
+
+        // Make sure modem is at least ready or go back to checking status until it is
+        if (GetCurrentModemState() == 0) {
+            DEV_Delay_ms(500);
             continue;
         }
+
+        // GNSS handling if enought time has passed since last check and GNSS is on regardless of network/registration status.
+        if (now - last_gnss_call >= pdMS_TO_TICKS(poll_rate_gnss_ms)) {
+            if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+                gnss = gnss_data.gnss_on;
+                xSemaphoreGive(gnss_data.mutex);
+            }
+            if (gnss) {
+                if (Modem_SendAT("AT+CGPSINFO", NULL, resp, sizeof(resp), 5000)) {
+                    ReplaceControlChars(resp);
+                    char *data = resp + strlen("AT+CGPSINFO +CGPSINFO: ");
+                    while (*data == ' ') data++;
+                    GNSS_ToOneLinerAndUpdate(data, resp, sizeof(resp));
+                }
+                
+            }
+            last_gnss_call = now;
+            memset(resp, 0, sizeof(resp));
+        }
+
+
+        // Make sure registration is fine before checking signal quality
+        if (GetCurrentModemState() < 2) {
+            DEV_Delay_ms(500);
+            continue;
+        }
+
         // CESQ handling if enough time has passed since last check (60s)
         if (now - last_cesq_call >= pdMS_TO_TICKS(poll_rate_cesq_ms)) {
             if (Modem_SendAT("AT+CESQ", NULL, resp, sizeof(resp), 5000)) {
@@ -683,24 +733,6 @@ static void ModemBackgroundTask(void *pv) {
                 }
             }
             last_cesq_call = now;
-            memset(resp, 0, sizeof(resp));
-        }
-        // GNSS handling if enought time has passed since last check and GNSS is on.
-        if (now - last_gnss_call >= pdMS_TO_TICKS(poll_rate_gnss_ms)) {
-            if (xSemaphoreTake(gnss_data.mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
-                gnss = gnss_data.gnss_on;
-                xSemaphoreGive(gnss_data.mutex);
-            }
-            if (gnss && modem_ready) {
-                if (Modem_SendAT("AT+CGPSINFO", NULL, resp, sizeof(resp), 5000)) {
-                    ReplaceControlChars(resp);
-                    char *data = resp + strlen("AT+CGPSINFO +CGPSINFO: ");
-                    while (*data == ' ') data++;
-                    GNSS_ToOneLinerAndUpdate(data, resp, sizeof(resp));
-                }
-                
-            }
-            last_gnss_call = now;
             memset(resp, 0, sizeof(resp));
         }
         // Loop half a second if no jobs are ready (not expensive)
@@ -722,7 +754,6 @@ static void Modem_StartBackgroundTask(void) {
 // display events are called from here so give some time for the display task to process them and update modem state 
 static void modemTask(void *pv) {
     (void)pv;
-    //TaskHandle_t status_task_handle = NULL;
     char line[256];
     size_t idx = 0;
 
@@ -734,12 +765,11 @@ static void modemTask(void *pv) {
     Modem_StartBackgroundTask();
     DEV_Delay_ms(1000);
 
-
-    // Init complete, enter main loop to handle commands and URCs
+    // Init complete, enter main loop to handle commands and URCs (VERY HIGH PRIORITY slightly less than keyboard input)
     for (;;) {
-        // if modem not ready, check current status
-        if (!modem_ready || !modemSerial) {
-            DEV_Delay_ms(5000);
+        // if modem not ready, simply wait for the background task to detect->update status 
+        if (GetCurrentModemState() == 0 || !modemSerial) {
+            DEV_Delay_ms(1000);
             continue;
         }
 
@@ -791,7 +821,7 @@ static void modemTask(void *pv) {
                     while (idx > 0 && (line[idx-1] == '\r' || line[idx-1] == '\n')) idx--;
                     line[idx] = '\0';
                     // DEBUG
-                    if (line[0] != '\0') printf("Modem RX: %s\r\n", line);
+                    //if (line[0] != '\0') printf("Modem RX: %s\r\n", line);
                     if (idx > 0) {
                         // Check if line matches current command prefix, if so append to response and check for OK/ERROR to finish command
                         if (current_cmd && current_cmd->match_prefix[0] != '\0' && strncmp(line, current_cmd->match_prefix, strlen(current_cmd->match_prefix)) == 0) {
@@ -873,10 +903,12 @@ bool Modem_Init(HardwareSerial *serial, int rxPin, int txPin, int powerPin) {
 
     // Mutex for modem uart access and state
     if (!modem_mutex) modem_mutex = xSemaphoreCreateMutex();
-    // Mutex for gnss data access
-    if (!gnss_data.mutex) gnss_data.mutex = xSemaphoreCreateMutex();
+    // Mutex for modem state access
+    if (!modem_state.mutex) modem_state.mutex = xSemaphoreCreateMutex();
     // Mutex for signal data access
     if (!signal_data.mutex) signal_data.mutex = xSemaphoreCreateMutex();
+    // Mutex for gnss data access
+    if (!gnss_data.mutex) gnss_data.mutex = xSemaphoreCreateMutex();
     
     // Queue
     if (!modem_cmd_queue) modem_cmd_queue = xQueueCreate(8, sizeof(ModemCmd*));
